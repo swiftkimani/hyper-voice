@@ -11,7 +11,7 @@ Everything runs locally and costs nothing: [Hammerspoon](https://www.hammerspoon
 | Gesture | What happens |
 |---|---|
 | **Hold Right ⌥ Option**, speak, release | Command mode. Acts on Hyper: presses shortcuts, types commands, runs the safe ones. |
-| **Tap Right ⌥ Option** (quick press) | Hands-free command mode. It listens, stops by itself after you pause for 1.5 s (or after 20 s), or when you tap again. For when holding a key is a pain. |
+| **Tap Right ⌥ Option** (quick press) | Hands-free command mode. It listens, stops by itself after you pause for 1.5 s (or after 20 s). Tap again to stop early. For when holding a key is a pain. |
 | **Hold or tap Right ⌘ Command** | Dictation, same two ways. The words are typed into whichever app is in front. |
 | Any other key while listening | Cancels. |
 
@@ -27,6 +27,7 @@ Local phrases run instantly, no AI involved. Join several with "and".
 |---|---|
 | new tab · close tab · next tab · previous tab | ⌘T · ⌘W · ⌃Tab · ⌃⇧Tab |
 | new window | ⌘N |
+| tab one … tab five · first tab · second tab | ⌘1 … ⌘5 (switch terminal by voice) |
 | split · split vertical · split horizontal | ⌃⇧E · ⌃⇧E · ⌃⇧O |
 | next pane · previous pane | ⌘] · ⌘[ |
 | clear | ⌃⇧K |
@@ -38,6 +39,8 @@ Local phrases run instantly, no AI involved. Join several with "and".
 | start claude · start opencode | starts the tool in Hyper |
 
 Filler words ("please", "hyper", "the", …) are ignored, so "open a new hyper tab please" still matches.
+
+Keystrokes go to whichever Hyper window and pane has focus, so with several terminals open say "tab two and git status" to pick one. Jobs running in the background do not get in the way; a program running in the foreground of that pane receives the keystrokes as its input, which is how you answer its prompts by voice.
 
 Anything else goes to the LLM, which replies with a plan of the same steps. Commands it marks as safe (navigation, read-only) run with Enter. Anything that deletes, moves, kills, installs or pushes is typed but **not** run, so you read it and press Return yourself. A local blocklist enforces this even if the model gets it wrong. Keystrokes are only ever sent once Hyper is confirmed to be the frontmost app; otherwise nothing is sent and the banner says so.
 
