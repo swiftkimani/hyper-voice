@@ -21,6 +21,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 | Cross-platform / MCP server | ⬜ not started | see Next |
 
 ## Done (most recent first)
+- 2026-10-04 panel clamped to the Hyper window while dragging, parked when Hyper is not in front, 50 Hz follow; resize grip (width) and text-size commands; file-based dev hook (~/.voice-term/cmd.lua → cmd.out)
 - 2026-10-04 assistant name (Fundi); project-folder matching and names in the AI context; volume-ducking fix (original level captured once); duplicate streamed lines fixed; global click watcher for dragging
 - 2026-10-04 split into voice / voice_panel / voice_speech / voice_ai; conversation panel with streamed replies; sentence-by-sentence speech queue; six-turn memory
 - 2026-10-04 SAY step: answers questions and greetings by voice; Groq documented as the fast free LLM; timers kept referenced (GC bug); hands-free pause 1.0 s
@@ -60,7 +61,8 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 - `claude` is logged in via the Keychain; `opencode` is optional.
 
 ## Known issues
-- Dragging the panel: implemented twice (canvas element tracking + a global left-click watcher); the synthetic-event test is unreliable, so it needs a real mouse check by the user.
+- Dragging the panel: verified with synthetic events (moved and saved); the user should confirm with a real mouse.
+- The `hs` CLI's IPC port jams after rapid or overlapping calls; use the cmd.lua hook for tests instead.
 - Kenyan voices come from edge-tts (unofficial Microsoft endpoint, no key). First utterance of a phrase needs internet; cached afterwards. Offline fallback is Tessa.
 - Hands-free auto-stop depends on `pauseLevel`; in a loud room it may run to `handsFreeMax` (20 s) before stopping.
 - Free-form requests take as long as a `claude -p` round trip: ~4–6 s with the start-up flags, more on a slow network. `--bare` would be faster still but cannot see the Keychain login.

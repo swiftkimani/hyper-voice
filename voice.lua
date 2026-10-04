@@ -71,6 +71,8 @@ M.aliases = {
   ["thank you"] = "SAY You're welcome.", ["thanks"] = "SAY Any time.",
   ["what time is it"] = "SAY_TIME", ["what is the time"] = "SAY_TIME",
   ["what is the date"] = "SAY_DATE", ["what day is it"] = "SAY_DATE",
+  ["bigger text"] = "FONT +2", ["larger text"] = "FONT +2", ["smaller text"] = "FONT -2",
+  ["wider panel"] = "WIDTH +120", ["narrower panel"] = "WIDTH -120", ["reset panel"] = "RESET_PANEL",
   ["what can you do"] = "SAY I control Hyper by voice: tabs, panes, folders, git, and any command you describe. I can also answer questions.",
   ["go home"] = "RUN cd ~", ["go back"] = "RUN cd -", ["go up"] = "RUN cd ..",
   ["list files"] = "RUN ls -la", ["git status"] = "RUN git status",
@@ -182,6 +184,11 @@ local function parseLine(line)
   if line == "SAY_HELLO" then line = "SAY Hello, I'm " .. M.config.name .. ". I'm listening." end
   if line == "SAY_WHO" then line = "SAY I'm " .. M.config.name .. ", your terminal assistant." end
   if line == "SAY_TIME" then line = "SAY It is " .. os.date("%I:%M %p"):gsub("^0", "") end
+  if line == "RESET_PANEL" then return { kind = "PANEL", arg = "reset" } end
+  local fontDelta = line:match("^FONT%s*([%+%-]%d+)$")
+  if fontDelta then return { kind = "PANEL", arg = "font " .. fontDelta } end
+  local widthDelta = line:match("^WIDTH%s*([%+%-]%d+)$")
+  if widthDelta then return { kind = "PANEL", arg = "width " .. widthDelta } end
   if line == "SAY_DATE" then line = "SAY Today is " .. os.date("%A, %d %B %Y") end
   local kind, arg = line:match("^(%u+)%s+(.+)$")
   if not kind then return nil end
@@ -230,6 +237,7 @@ local function describeStep(s)
   if s.kind == "RUN" then return s.arg .. " ↵" end
   if s.kind == "TYPE" then return s.arg .. "  (press ↵ to run)" end
   if s.kind == "OPEN" then return "open " .. s.arg end
+  if s.kind == "PANEL" then return "panel " .. s.arg end
   return s.arg
 end
 
@@ -244,6 +252,7 @@ local function spokenStep(s)
   if s.kind == "RUN" then return (s.arg:gsub("~/", ""):gsub("[%p]", " ")) end
   if s.kind == "TYPE" then return "typed, press return to run" end
   if s.kind == "OPEN" then return "opening " .. s.arg end
+  if s.kind == "PANEL" then return "done" end
   return s.arg
 end
 
@@ -271,6 +280,11 @@ local function doStep(step)
     hs.application.launchOrFocus(step.arg)
   elseif step.kind == "SAY" then
     speech.speak(step.arg)
+  elseif step.kind == "PANEL" then
+    local what, delta = step.arg:match("^(%a+)%s*([%+%-]?%d*)$")
+    if what == "reset" then panel.resetPosition(); panel.width(640); panel.font(13 - panel.font(0))
+    elseif what == "font" then panel.font(tonumber(delta))
+    elseif what == "width" then local f = panel.frame(); panel.width((f and f.w or 640) + tonumber(delta)) end
   end
 end
 
@@ -456,6 +470,7 @@ end
 
 local function handleCommand(heard)
   speech.stop()
+  panel.anywhere(false)
   heard = stripName(heard)
   panel.add("you", heard)
   local plan = matchLocally(normalize(heard))
@@ -464,6 +479,7 @@ end
 
 local function handleDictation(heard)
   log("dictate", heard, "typed")
+  panel.anywhere(true)
   panel.add("you", heard)
   panel.add("hyper", "typed", true)
   panel.clearStatus()
@@ -532,6 +548,7 @@ local function startRecording(mode, handsFree)
   state.handsFree, state.switchToHandsFree = handsFree or false, nil
   speech.stop()
   duck()
+  panel.anywhere(mode == "dictate")
   local title = mode == "command" and "listening" or "listening — dictation"
   panel.status(handsFree and (title .. " · hands-free, stops when you pause · tap to stop") or (title .. " · release to send · tap for hands-free"), "listening")
   local args = { "-q", "-d", "-c", "1", "-r", "16000", "-b", "16", wavPath, "highpass", "100" }
@@ -611,8 +628,29 @@ function M.say_text(text) speech.speak(text) end                      -- try the
 function M.banner(text) panel.add("hyper", text or "banner test") end -- show the panel
 function M.pin(on) M.config.panelPinned = on ~= false; panel.pin(on) end
 function M.resetBanner() panel.resetPosition() end
+function M.panelFont(delta) return panel.font(delta or 0) end           -- e.g. panelFont(2) bigger, panelFont(-2) smaller
+function M.panelWidth(w) panel.width(w) end
 function M.panelFrame() local f = panel.frame(); return f and string.format("%d,%d,%d,%d", f.x, f.y, f.w, f.h) or "hidden" end
 function M.forget() history = {} end                                  -- clear conversation memory
+
+-- Developer hook: drop Lua into ~/.voice-term/cmd.lua and the result lands in
+-- ~/.voice-term/cmd.out. Avoids the `hs` CLI, whose IPC port is fragile.
+local cmdPath, outPath = logDir .. "/cmd.lua", logDir .. "/cmd.out"
+local function runCommandFile()
+  local f = io.open(cmdPath, "r")
+  if not f then return end
+  local code = f:read("a"); f:close()
+  os.remove(cmdPath)
+  if not code or trim(code) == "" then return end
+  local chunk, err = load(code, "cmd.lua", "t", setmetatable({ voice = M, panel = panel, speech = speech }, { __index = _G }))
+  local ok, result
+  if chunk then ok, result = pcall(chunk) else ok, result = false, err end
+  local out = io.open(outPath, "w")
+  if out then out:write((ok and "OK " or "ERR ") .. tostring(result) .. "\n"); out:close() end
+end
+timers.cmdWatcher = hs.pathwatcher.new(logDir, function(paths)
+  for _, p in ipairs(paths) do if p == cmdPath then runCommandFile(); return end end
+end):start()
 
 local function startTaps()
   M.flagsTap:start()
