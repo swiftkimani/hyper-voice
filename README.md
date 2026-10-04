@@ -2,9 +2,15 @@
 
 Push-to-talk voice control for the [Hyper](https://hyper.is) terminal on macOS, plus dictation into any app.
 
-Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. What was heard and what was done appears in a small banner glued to the Hyper window. It follows the window when you move or resize it and fades out after a few seconds. Drag it with the mouse to wherever you like on the window and it remembers that spot. Pin it with `hs -c 'require("voice").pin(true)'` if you want it always visible; `resetBanner()` puts it back at the top centre.
+Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. A small conversation panel glued to the Hyper window shows the exchange like a chat: what you said, then the reply streaming in word by word as the model produces it, with a status line underneath (listening, transcribing, thinking with a timer, done). Spoken replies are said sentence by sentence as they arrive, so you hear the first sentence while the rest is still coming. The last six exchanges are remembered, so "and the second one?" or "do that again" work. The panel follows the window when you move or resize it, fades after a few seconds, and can be dragged anywhere on the window; it remembers the spot. `hs -c 'require("voice").pin(true)'` keeps it on screen, `resetBanner()` puts it back at the top centre, `forget()` clears the conversation memory.
 
 Everything runs locally and costs nothing: [Hammerspoon](https://www.hammerspoon.org) listens for the key, [sox](https://sox.sourceforge.net) records the mic, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) turns speech into text offline, and the built-in macOS voice talks back. Phrases are matched locally first. Anything unmatched is turned into a short plan by an LLM: [Claude Code](https://claude.com/claude-code) (`claude -p`), [opencode](https://opencode.ai), or any OpenAI-compatible endpoint such as [Ollama](https://ollama.com) running a local model.
+
+## Its name
+
+The assistant is called **Fundi** (Swahili for a skilled craftsman). Say the name or not, as you like: "Fundi, new tab" and "new tab" do the same thing. It introduces itself ("hello", "who are you") and the panel labels its lines `fundi`. One line changes it: `name = "…"` at the top of `voice.lua`.
+
+There is deliberately no "Hey Fundi" wake word: always-on listening would trigger on meetings and music, and the free wake-word engines either need a cloud key or a Python runtime. Hold or tap the key instead. If you want a wake word later, Picovoice Porcupine (free for personal use) is the route; it is on the roadmap in `docs/CONTEXT.md`.
 
 ## Gestures
 
@@ -54,7 +60,9 @@ Local phrases run instantly, no AI involved. Join several with "and".
 | list files · git status · git log · git diff · git pull | the command, and Enter |
 | open Safari · launch Figma | opens the app |
 | start claude · start opencode | starts the tool in Hyper |
-| hello · thanks · what time is it · what is the date · what can you do | answers out loud |
+| hello · who are you · thanks · what time is it · what is the date · what can you do | answers out loud |
+| open design poc · open project kata · go to project vclean | `cd` into the matching folder under `~/Desktop/projects` (fuzzy: "design poc" finds `design-poc`) |
+| run claude · start opencode | starts the tool in the current pane |
 
 Filler words ("please", "hyper", "the", …) are ignored, so "open a new hyper tab please" still matches.
 
@@ -119,7 +127,10 @@ Edit `~/.hammerspoon/voice.lua`, then Reload Config from the Hammerspoon menu-ba
 | `bannerPinned` | `false` | `true` keeps the banner on screen permanently; `hs -c 'require("voice").pin(true)'` toggles it live. |
 | `commandKey` / `dictateKey` | 61 / 54 | Right ⌥ / Right ⌘. Left ⌥ = 58, Left ⌘ = 55. |
 | `duckVolume` | 10 | Speaker volume while listening. |
-| `aiContext` | one sentence | Context given to the AI with every request. |
+| `name` | `"Fundi"` | What the assistant is called. |
+| `aiContext` | one sentence | Context given to the AI with every request. Your project folder names are added automatically. |
+| `historyTurns` | 6 | Exchanges remembered for follow-ups. |
+| `panelLines` / `panelSeconds` / `panelPinned` | 6 / 6 / `false` | Panel size, how long it stays, whether it ever hides. |
 
 Plan steps, used by aliases, patterns and the AI alike:
 
@@ -158,7 +169,10 @@ Right ⌥ down ─► sox records mic ─► Right ⌥ up ─► whisper-cli (of
 
 ## Files
 
-- `voice.lua` — the Hammerspoon module. Installed to `~/.hammerspoon/voice.lua`.
+- `voice.lua` — config, phrases, recording, plan execution, keys. Installed to `~/.hammerspoon/` with the three below.
+- `voice_panel.lua` — the conversation panel (follow, drag, pin, streaming lines).
+- `voice_speech.lua` — talking back: edge-tts Kenyan voices with cache and playback queue, macOS fallback.
+- `voice_ai.lua` — the LLM providers with token streaming (Claude Code stream-json, OpenAI-compatible SSE via curl).
 - `install.sh` — idempotent installer.
 - `docs/CONTEXT.md` — where the work stands and what is planned (including the cross-platform MCP idea).
 

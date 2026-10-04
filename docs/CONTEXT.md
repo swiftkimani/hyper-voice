@@ -21,6 +21,8 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 | Cross-platform / MCP server | ⬜ not started | see Next |
 
 ## Done (most recent first)
+- 2026-10-04 assistant name (Fundi); project-folder matching and names in the AI context; volume-ducking fix (original level captured once); duplicate streamed lines fixed; global click watcher for dragging
+- 2026-10-04 split into voice / voice_panel / voice_speech / voice_ai; conversation panel with streamed replies; sentence-by-sentence speech queue; six-turn memory
 - 2026-10-04 SAY step: answers questions and greetings by voice; Groq documented as the fast free LLM; timers kept referenced (GC bug); hands-free pause 1.0 s
 - 2026-10-04 Kenyan voices via edge-tts with on-disk cache and warm-up; banner drag fixed (elements need trackMouseDown); pin option
 - 2026-10-04 draggable banner with remembered offset per window; Tessa (en_ZA) default voice with fallback; `banner()` test hook
@@ -31,6 +33,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 - 2026-10-04 first version: hold-to-talk, whisper, aliases, AI command conversion
 
 ## Next
+0. Optional wake word ("Hey Fundi") via Picovoice Porcupine if the user wants it; not started.
 1. User to add a Groq key (`ai = "http"`) for ~0.5 s free-form commands; collect misheard phrases from history.log into patterns.
 2. Optional: a Hyper plugin that renders the banner inside the terminal DOM instead of a floating canvas.
 3. **Cross-platform MCP server (proposed, not started).** Split the tool in two:
@@ -46,6 +49,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 
 ## Decisions
 - Hammerspoon beside Hyper rather than a Hyper plugin: a plugin cannot hold the mic or listen while Hyper is unfocused.
+- Streaming: Claude Code via `--output-format stream-json --include-partial-messages`, HTTP providers via curl SSE; lines are acted on as they complete, so the first sentence is spoken before the reply ends.
 - Hold-to-talk, no wake word: cannot be triggered by meetings or music; nothing is said aloud.
 - Siri rejected: wake word, mishears in noise, no free-form shell commands.
 - whisper small.en over base.en: noticeably better in noise; still fast enough.
@@ -56,6 +60,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 - `claude` is logged in via the Keychain; `opencode` is optional.
 
 ## Known issues
+- Dragging the panel: implemented twice (canvas element tracking + a global left-click watcher); the synthetic-event test is unreliable, so it needs a real mouse check by the user.
 - Kenyan voices come from edge-tts (unofficial Microsoft endpoint, no key). First utterance of a phrase needs internet; cached afterwards. Offline fallback is Tessa.
 - Hands-free auto-stop depends on `pauseLevel`; in a loud room it may run to `handsFreeMax` (20 s) before stopping.
 - Free-form requests take as long as a `claude -p` round trip: ~4–6 s with the start-up flags, more on a slow network. `--bare` would be faster still but cannot see the Keychain login.

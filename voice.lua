@@ -1,538 +1,212 @@
 -- voice.lua — push-to-talk voice control for the Hyper terminal, plus dictation anywhere.
 --
--- Hold Right ⌥ (Option)  and speak → command mode: acts on Hyper (shortcuts, commands).
--- Hold Right ⌘ (Command) and speak → dictation: types the words into the app in front.
--- Press any other key while holding → cancel.
+-- Hold Right ⌥ (Option)  and speak → command mode: acts on Hyper, answers questions.
+-- Tap  Right ⌥             → hands-free: listens until you pause; tap again to stop.
+-- Hold or tap Right ⌘      → dictation: types the words into the app in front.
+-- Press any other key while listening → cancel.
 --
--- Speech-to-text is whisper.cpp running offline. Phrases are matched locally first;
--- anything unmatched is turned into a short plan by Claude Code (or opencode).
--- Status, what was heard and what was done are shown in an overlay at the top
--- centre of the Hyper window.
+-- Speech-to-text is whisper.cpp running offline. Phrases are matched locally
+-- first; anything else goes to an LLM whose reply streams into a conversation
+-- panel glued to the Hyper window and is spoken as it arrives.
 
 local M = {}
 local home = os.getenv("HOME")
+local panel = require("voice_panel")
+local speech = require("voice_speech")
+local ai = require("voice_ai")
 
 M.config = {
+  name = "Fundi",                      -- what the assistant is called; say it before a phrase or not at all
   ai = "claude",                       -- "claude" | "opencode" | "http" | "none"
-  -- Flags that skip Claude Code's start-up work (MCP connectors, sessions, skills):
-  -- they cut a voice command from ~12 s to ~5 s. Remove "--model","haiku" if haiku isn't on your plan.
+  -- Flags that skip Claude Code's start-up work (MCP connectors, sessions, skills). Drop "--model","haiku" if haiku isn't on your plan.
   claudeArgs = { "--model", "haiku", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
     "--no-session-persistence", "--no-chrome", "--disable-slash-commands", "--setting-sources", "" },
-  opencodeArgs = {},                   -- e.g. { "-m", "anthropic/claude-haiku-4-5" }
-  -- ai = "http": any OpenAI-compatible chat endpoint. Works with Ollama (free, local),
-  -- LM Studio, OpenAI, Groq, OpenRouter, Gemini's compatibility endpoint, etc.
-  -- Fastest free option: Groq (https://console.groq.com, free key) — about half a second per request:
-  --   ai = "http", aiEndpoint = "https://api.groq.com/openai/v1/chat/completions",
-  --   aiModel = "llama-3.1-8b-instant", aiApiKey = "gsk_…"
+  opencodeArgs = {},
+  -- ai = "http": any OpenAI-compatible endpoint. Fastest free option is Groq (free key at console.groq.com):
+  --   ai = "http", aiEndpoint = "https://api.groq.com/openai/v1/chat/completions", aiModel = "llama-3.1-8b-instant", aiApiKey = "gsk_…"
   aiEndpoint = "http://127.0.0.1:11434/v1/chat/completions",
   aiModel = "llama3.2",
   aiApiKey = nil,
+  aiContext = "Projects live in ~/Desktop/projects. Home folders: ~/Desktop, ~/Downloads, ~/Documents. The user is in Nairobi, Kenya.",
+  historyTurns = 6,                    -- exchanges remembered for follow-up questions
   model = home .. "/.voice-term/models/ggml-small.en.bin",
   terminalApp = "Hyper",
   commandKey = 61,                     -- right ⌥   (left ⌥ = 58)
   dictateKey = 54,                     -- right ⌘   (left ⌘ = 55)
   duckVolume = 10,                     -- speaker volume while listening (0–100)
-  minSeconds = 0.4,                    -- shorter holds are ignored as accidental taps
-  aiMayRun = true,                     -- let AI plans press Enter on commands it marks safe
-  overlaySeconds = 4,                  -- how long the result stays on screen
-  bannerPinned = false,                -- true: the banner never auto-hides (last result stays visible)
-  stepDelay = 0.22,                    -- pause between steps of a plan (seconds)
-  speak = true,                        -- say a short confirmation out loud
-  tts = "edge",                        -- "edge": Kenyan voices via edge-tts (online, cached) | "system": macOS voice (offline)
-  edgeVoice = "en-KE-AsiliaNeural",    -- en-KE-AsiliaNeural (f) · en-KE-ChilembaNeural (m) · sw-KE-ZuriNeural (f) · sw-KE-RafikiNeural (m)
-  speakVoice = "Tessa",                -- macOS fallback voice (South African English); nil = system default. `say -v ?` lists names
-  focusTimeout = 4,                    -- seconds to wait for Hyper to come to the front
-  tapToTalk = true,                    -- a quick tap (not hold) starts hands-free listening
+  minSeconds = 0.4,                    -- shorter holds count as a tap (hands-free)
+  tapToTalk = true,
   pauseStop = 1.0,                     -- hands-free: stop after this many seconds of silence
   pauseLevel = "2%",                   -- hands-free: what counts as silence (raise in noisy rooms)
-  handsFreeMax = 20,                   -- hands-free: hard stop after this many seconds
-  aiContext = "Projects live in ~/Desktop/projects. Home folders: ~/Desktop, ~/Downloads, ~/Documents.",
+  handsFreeMax = 20,
+  aiMayRun = true,                     -- let AI plans press Enter on commands it marks safe
+  stepDelay = 0.22,
+  focusTimeout = 4,
+  panelLines = 6,                      -- exchanges visible in the panel
+  panelSeconds = 6,                    -- how long the panel stays after the last activity
+  panelPinned = false,                 -- true: never auto-hide
+  speak = true,
+  tts = "edge",                        -- "edge": Kenyan voices via edge-tts (online, cached) | "system": macOS voice (offline)
+  edgeVoice = "en-KE-AsiliaNeural",    -- en-KE-ChilembaNeural (m) · sw-KE-ZuriNeural (f) · sw-KE-RafikiNeural (m)
+  speakVoice = "Tessa",                -- macOS fallback voice
 }
 
 -- Terminal shortcuts the voice layer can press. Must match ~/.hyper.js keymaps.
 M.actions = {
-  ["tab:new"]              = { { "cmd" }, "t" },
-  ["tab:close"]            = { { "cmd" }, "w" },
-  ["tab:next"]             = { { "ctrl" }, "tab" },
-  ["tab:prev"]             = { { "ctrl", "shift" }, "tab" },
-  ["window:new"]           = { { "cmd" }, "n" },
-  ["tab:jump1"]            = { { "cmd" }, "1" },
-  ["tab:jump2"]            = { { "cmd" }, "2" },
-  ["tab:jump3"]            = { { "cmd" }, "3" },
-  ["tab:jump4"]            = { { "cmd" }, "4" },
-  ["tab:jump5"]            = { { "cmd" }, "5" },
-  ["pane:splitVertical"]   = { { "ctrl", "shift" }, "e" },
-  ["pane:splitHorizontal"] = { { "ctrl", "shift" }, "o" },
-  ["pane:next"]            = { { "cmd" }, "]" },
-  ["pane:prev"]            = { { "cmd" }, "[" },
-  ["editor:clearBuffer"]   = { { "ctrl", "shift" }, "k" },
-  ["editor:interrupt"]     = { { "ctrl" }, "c" },
-  ["editor:search"]        = { { "cmd" }, "f" },
-  ["window:reload"]        = { { "ctrl", "shift" }, "r" },
+  ["tab:new"] = { { "cmd" }, "t" }, ["tab:close"] = { { "cmd" }, "w" },
+  ["tab:next"] = { { "ctrl" }, "tab" }, ["tab:prev"] = { { "ctrl", "shift" }, "tab" },
+  ["tab:jump1"] = { { "cmd" }, "1" }, ["tab:jump2"] = { { "cmd" }, "2" }, ["tab:jump3"] = { { "cmd" }, "3" },
+  ["tab:jump4"] = { { "cmd" }, "4" }, ["tab:jump5"] = { { "cmd" }, "5" },
+  ["window:new"] = { { "cmd" }, "n" },
+  ["pane:splitVertical"] = { { "ctrl", "shift" }, "e" }, ["pane:splitHorizontal"] = { { "ctrl", "shift" }, "o" },
+  ["pane:next"] = { { "cmd" }, "]" }, ["pane:prev"] = { { "cmd" }, "[" },
+  ["editor:clearBuffer"] = { { "ctrl", "shift" }, "k" }, ["editor:interrupt"] = { { "ctrl" }, "c" },
+  ["editor:search"] = { { "cmd" }, "f" }, ["window:reload"] = { { "ctrl", "shift" }, "r" },
 }
 
--- Plan steps, one per line. Used by aliases, patterns and the AI alike:
---   KEYS <action>     press a terminal shortcut from M.actions
---   RUN  <command>    type a shell command into Hyper and press Enter
---   TYPE <command>    type a shell command into Hyper, do NOT press Enter
---   OPEN <app name>   open a macOS app
---   SAY  <sentence>   answer out loud (general questions, greetings, confirmations)
-
--- Exact phrases (lower-case, no punctuation). Value: a step, or a table of steps.
+-- Plan steps, one per line, shared by aliases, patterns and the AI:
+--   KEYS <action> · RUN <command> (Enter) · TYPE <command> (no Enter) · OPEN <app> · SAY <sentence>
 M.aliases = {
-  ["hello"]           = "SAY Hello. I'm listening.",
-  ["hi"]              = "SAY Hi. What do you need?",
-  ["thank you"]       = "SAY You're welcome.",
-  ["thanks"]          = "SAY Any time.",
-  ["what time is it"] = "SAY_TIME",
-  ["what is the time"] = "SAY_TIME",
-  ["what is the date"] = "SAY_DATE",
-  ["what day is it"]  = "SAY_DATE",
+  ["hello"] = "SAY_HELLO", ["hi"] = "SAY_HELLO", ["who are you"] = "SAY_WHO", ["what is your name"] = "SAY_WHO",
+  ["thank you"] = "SAY You're welcome.", ["thanks"] = "SAY Any time.",
+  ["what time is it"] = "SAY_TIME", ["what is the time"] = "SAY_TIME",
+  ["what is the date"] = "SAY_DATE", ["what day is it"] = "SAY_DATE",
   ["what can you do"] = "SAY I control Hyper by voice: tabs, panes, folders, git, and any command you describe. I can also answer questions.",
-  ["go home"]         = "RUN cd ~",
-  ["go back"]         = "RUN cd -",
-  ["go up"]           = "RUN cd ..",
-  ["list files"]      = "RUN ls -la",
-  ["git status"]      = "RUN git status",
-  ["git log"]         = "RUN git log --oneline -n 20",
-  ["git diff"]        = "RUN git diff",
-  ["git pull"]        = "RUN git pull",
-  ["open here"]       = "RUN open .",
-  ["start claude"]    = "RUN claude",
-  ["start open code"] = "RUN opencode",
-  ["start opencode"]  = "RUN opencode",
+  ["go home"] = "RUN cd ~", ["go back"] = "RUN cd -", ["go up"] = "RUN cd ..",
+  ["list files"] = "RUN ls -la", ["git status"] = "RUN git status",
+  ["git log"] = "RUN git log --oneline -n 20", ["git diff"] = "RUN git diff", ["git pull"] = "RUN git pull",
+  ["open here"] = "RUN open .", ["start claude"] = "RUN claude",
+  ["start open code"] = "RUN opencode", ["start opencode"] = "RUN opencode",
 }
 
--- Substring patterns, checked in order, on each part of the phrase ("… and …").
 M.patterns = {
-  { "new tab",          "KEYS tab:new" },
-  { "open a tab",       "KEYS tab:new" },
-  { "another tab",      "KEYS tab:new" },
-  { "close tab",        "KEYS tab:close" },
-  { "close this tab",   "KEYS tab:close" },
-  { "close the tab",    "KEYS tab:close" },
-  { "next tab",         "KEYS tab:next" },
-  { "previous tab",     "KEYS tab:prev" },
-  { "last tab",         "KEYS tab:prev" },
-  { "new window",       "KEYS window:new" },
-  { "first tab",        "KEYS tab:jump1" },
-  { "tab one",          "KEYS tab:jump1" },
-  { "tab 1",            "KEYS tab:jump1" },
-  { "second tab",       "KEYS tab:jump2" },
-  { "tab two",          "KEYS tab:jump2" },
-  { "tab 2",            "KEYS tab:jump2" },
-  { "third tab",        "KEYS tab:jump3" },
-  { "tab three",        "KEYS tab:jump3" },
-  { "tab 3",            "KEYS tab:jump3" },
-  { "fourth tab",       "KEYS tab:jump4" },
-  { "tab four",         "KEYS tab:jump4" },
-  { "tab 4",            "KEYS tab:jump4" },
-  { "fifth tab",        "KEYS tab:jump5" },
-  { "tab five",         "KEYS tab:jump5" },
-  { "tab 5",            "KEYS tab:jump5" },
-  { "split horizontal", "KEYS pane:splitHorizontal" },
-  { "split down",       "KEYS pane:splitHorizontal" },
-  { "split vertical",   "KEYS pane:splitVertical" },
-  { "split side",       "KEYS pane:splitVertical" },
-  { "split",            "KEYS pane:splitVertical" },
-  { "next pane",        "KEYS pane:next" },
-  { "previous pane",    "KEYS pane:prev" },
-  { "clear",            "KEYS editor:clearBuffer" },
-  { "interrupt",        "KEYS editor:interrupt" },
-  { "stop that",        "KEYS editor:interrupt" },
-  { "stop it",          "KEYS editor:interrupt" },
-  { "reload hyper",     "KEYS window:reload" },
+  { "new tab", "KEYS tab:new" }, { "open a tab", "KEYS tab:new" }, { "another tab", "KEYS tab:new" },
+  { "close tab", "KEYS tab:close" }, { "close this tab", "KEYS tab:close" }, { "close the tab", "KEYS tab:close" },
+  { "next tab", "KEYS tab:next" }, { "previous tab", "KEYS tab:prev" }, { "last tab", "KEYS tab:prev" },
+  { "new window", "KEYS window:new" },
+  { "first tab", "KEYS tab:jump1" }, { "tab one", "KEYS tab:jump1" }, { "tab 1", "KEYS tab:jump1" },
+  { "second tab", "KEYS tab:jump2" }, { "tab two", "KEYS tab:jump2" }, { "tab 2", "KEYS tab:jump2" },
+  { "third tab", "KEYS tab:jump3" }, { "tab three", "KEYS tab:jump3" }, { "tab 3", "KEYS tab:jump3" },
+  { "fourth tab", "KEYS tab:jump4" }, { "tab four", "KEYS tab:jump4" }, { "tab 4", "KEYS tab:jump4" },
+  { "fifth tab", "KEYS tab:jump5" }, { "tab five", "KEYS tab:jump5" }, { "tab 5", "KEYS tab:jump5" },
+  { "split horizontal", "KEYS pane:splitHorizontal" }, { "split down", "KEYS pane:splitHorizontal" },
+  { "split vertical", "KEYS pane:splitVertical" }, { "split side", "KEYS pane:splitVertical" }, { "split", "KEYS pane:splitVertical" },
+  { "next pane", "KEYS pane:next" }, { "previous pane", "KEYS pane:prev" },
+  { "clear", "KEYS editor:clearBuffer" }, { "interrupt", "KEYS editor:interrupt" },
+  { "stop that", "KEYS editor:interrupt" }, { "stop it", "KEYS editor:interrupt" }, { "reload hyper", "KEYS window:reload" },
 }
 
--- Words dropped before local matching, so "open a new hyper tab please" matches "new tab".
 M.fillers = { "hyper", "terminal", "please", "a", "an", "the", "me", "up", "just", "now", "can", "you" }
 
--- Folder names understood by "go to <name>" / "cd to <name>" / "change to <name>".
-M.places = {
-  home = "~", downloads = "~/Downloads", desktop = "~/Desktop", documents = "~/Documents",
-  projects = "~/Desktop/projects", root = "/", temp = "/tmp", tmp = "/tmp",
+M.places = { home = "~", downloads = "~/Downloads", desktop = "~/Desktop", documents = "~/Documents",
+  projects = "~/Desktop/projects", root = "/", temp = "/tmp", tmp = "/tmp" }
+
+local spokenAction = {
+  ["tab:new"] = "new tab", ["tab:close"] = "close tab", ["tab:next"] = "next tab", ["tab:prev"] = "previous tab",
+  ["window:new"] = "new window", ["tab:jump1"] = "tab one", ["tab:jump2"] = "tab two", ["tab:jump3"] = "tab three",
+  ["tab:jump4"] = "tab four", ["tab:jump5"] = "tab five", ["pane:splitVertical"] = "split",
+  ["pane:splitHorizontal"] = "split down", ["pane:next"] = "next pane", ["pane:prev"] = "previous pane",
+  ["editor:clearBuffer"] = "clear", ["editor:interrupt"] = "interrupt", ["editor:search"] = "search", ["window:reload"] = "reload",
 }
 
 -- ---------------------------------------------------------------------------
 
--- Timers must stay referenced or Hammerspoon's garbage collector can cancel them.
+local logDir, wavPath, logPath = home .. "/.voice-term", home .. "/.voice-term/last.wav", home .. "/.voice-term/history.log"
 local timers = {}
 local function after(seconds, fn)
   local id = #timers + 1
-  timers[id] = hs.timer.doAfter(seconds, function()
-    timers[id] = nil
-    fn()
-  end)
+  timers[id] = hs.timer.doAfter(seconds, function() timers[id] = nil; fn() end)
   return timers[id]
 end
-
-local logDir  = home .. "/.voice-term"
-local wavPath = logDir .. "/last.wav"
-local logPath = logDir .. "/history.log"
 
 local function findBin(names)
   for _, n in ipairs(names) do
     for _, dir in ipairs({ "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin" }) do
-      local p = dir .. "/" .. n
-      if hs.fs.attributes(p) then return p end
+      if hs.fs.attributes(dir .. "/" .. n) then return dir .. "/" .. n end
     end
   end
   return nil
 end
-
-local bin = {
-  sox      = findBin({ "sox" }),
-  whisper  = findBin({ "whisper-cli", "whisper-cpp" }),
-  claude   = findBin({ "claude" }),
-  opencode = findBin({ "opencode" }),
-}
-
--- Child processes get a minimal but complete environment. USER is required:
--- Claude Code reads its login from the Keychain and reports "Not logged in" without it.
-local env = {
-  HOME = home,
-  USER = os.getenv("USER") or home:match("([^/]+)$"),
-  PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-  LANG = "en_US.UTF-8",
-  TERM = "xterm-256color",
-  SHELL = os.getenv("SHELL") or "/bin/zsh",
-}
+local bin = { sox = findBin({ "sox" }), whisper = findBin({ "whisper-cli", "whisper-cpp" }) }
+local env = { HOME = home, USER = os.getenv("USER") or home:match("([^/]+)$"),
+  PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", LANG = "en_US.UTF-8" }
 
 local function log(mode, heard, action)
   local f = io.open(logPath, "a")
   if f then
-    f:write(os.date("%Y-%m-%d %H:%M:%S"), "\t", mode, "\t", (heard or ""):gsub("\n", " "), "\t",
-      (action or ""):gsub("\n", " | "), "\n")
+    f:write(os.date("%Y-%m-%d %H:%M:%S"), "\t", mode, "\t", (heard or ""):gsub("\n", " "), "\t", (action or ""):gsub("\n", " | "), "\n")
     f:close()
   end
 end
-
 local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 local function normalize(s) return trim(s:lower():gsub("[%p]", " "):gsub("%s+", " ")) end
 
-local function lastUsefulLine(s)
-  local last = ""
-  for line in (s or ""):gmatch("[^\n]+") do
-    if not line:find("Permission allow rule", 1, true) and trim(line) ~= "" then last = trim(line) end
+-- Names of the user's project folders, so "open design poc" can be matched
+-- locally and the AI knows what exists.
+local projectsDir = home .. "/Desktop/projects"
+local function projectNames()
+  local names = {}
+  if not hs.fs.attributes(projectsDir) then return names end
+  for entry in hs.fs.dir(projectsDir) do
+    if entry:sub(1, 1) ~= "." and hs.fs.attributes(projectsDir .. "/" .. entry, "mode") == "directory" then
+      table.insert(names, entry)
+    end
   end
-  return last
+  table.sort(names)
+  return names
+end
+local function slug(s) return (s:lower():gsub("[^%w]", "")) end
+local function projectMatch(spoken)
+  local want = slug(spoken)
+  if want == "" then return nil end
+  local best, bestLen
+  for _, name in ipairs(projectNames()) do
+    local have = slug(name)
+    if have == want then return name end
+    if (have:find(want, 1, true) or want:find(have, 1, true)) and (not bestLen or #have < bestLen) then best, bestLen = name, #have end
+  end
+  return best
+end
+
+local history = {}
+local function remember(you, bot)
+  table.insert(history, { you = you, bot = bot })
+  while #history > M.config.historyTurns do table.remove(history, 1) end
 end
 
 -- ---------------------------------------------------------------------------
--- Overlay: a small banner at the top centre of the Hyper window (or the screen)
+-- Plans
 
-local overlay = { canvas = nil, hideTimer = nil, followTimer = nil, lastKey = nil, dragging = false, dragTap = nil }
-local OFFSET_KEY = "voice.bannerOffset"
-
-local function terminalWindow()
-  local app = hs.application.find(M.config.terminalApp)
-  if not app then return nil end
-  local win = app:focusedWindow() or app:mainWindow() or app:allWindows()[1]
-  if win and win:isVisible() and not win:isMinimized() then return win end
+local function parseLine(line)
+  line = trim(line):gsub("^[%-%*%d%.]+%s+", "")
+  if line == "SAY_HELLO" then line = "SAY Hello, I'm " .. M.config.name .. ". I'm listening." end
+  if line == "SAY_WHO" then line = "SAY I'm " .. M.config.name .. ", your terminal assistant." end
+  if line == "SAY_TIME" then line = "SAY It is " .. os.date("%I:%M %p"):gsub("^0", "") end
+  if line == "SAY_DATE" then line = "SAY Today is " .. os.date("%A, %d %B %Y") end
+  local kind, arg = line:match("^(%u+)%s+(.+)$")
+  if not kind then return nil end
+  arg = trim(arg)
+  if kind == "KEYS" then return M.actions[arg] and { kind = kind, arg = arg } or nil end
+  if kind == "RUN" or kind == "TYPE" or kind == "OPEN" or kind == "SAY" then return { kind = kind, arg = arg } end
   return nil
 end
-
--- Where the banner goes: top centre of the terminal window by default, or
--- wherever it was last dragged to (an offset from the window's top-left corner).
-local function overlayFrame()
-  local target = terminalWindow() or hs.window.frontmostWindow()
-  local f = target and target:frame() or hs.screen.mainScreen():frame()
-  local w = math.min(640, math.max(320, f.w - 40))
-  local off = hs.settings.get(OFFSET_KEY)
-  if off and off.dx and off.dy then
-    local x = f.x + math.max(0, math.min(off.dx, f.w - w))
-    local y = f.y + math.max(0, math.min(off.dy, f.h - 44))
-    return { x = x, y = y, w = w }
-  end
-  return { x = f.x + (f.w - w) / 2, y = f.y + 8, w = w }
-end
-
-local function rememberOffset()
-  local win = terminalWindow()
-  if not win or not overlay.canvas then return end
-  local wf, cf = win:frame(), overlay.canvas:frame()
-  hs.settings.set(OFFSET_KEY, { dx = cf.x - wf.x, dy = cf.y - wf.y })
-end
-
--- Drag the banner with the mouse. A global tap follows the pointer even when
--- it outruns the banner, and the drop position is remembered relative to the window.
-local function startDrag()
-  if overlay.dragging or not overlay.canvas then return end
-  overlay.dragging = true
-  if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
-  local startMouse, startFrame = hs.mouse.absolutePosition(), overlay.canvas:frame()
-  local types = hs.eventtap.event.types
-  overlay.dragTap = hs.eventtap.new({ types.leftMouseDragged, types.leftMouseUp }, function(e)
-    local m = hs.mouse.absolutePosition()
-    if e:getType() == types.leftMouseDragged then
-      overlay.canvas:frame({ x = startFrame.x + (m.x - startMouse.x), y = startFrame.y + (m.y - startMouse.y),
-        w = startFrame.w, h = startFrame.h })
-      return true
-    end
-    overlay.dragTap:stop(); overlay.dragTap = nil
-    overlay.dragging, overlay.lastKey = false, nil
-    rememberOffset()
-    if not M.config.bannerPinned then
-      overlay.hideTimer = hs.timer.doAfter(M.config.overlaySeconds, function() overlay.canvas:hide(0.25) end)
-    end
-    return true
-  end)
-  overlay.dragTap:start()
-end
-
--- Forget the dragged position and go back to the top centre.
-function M.resetBanner()
-  hs.settings.clear(OFFSET_KEY)
-  overlay.lastKey = nil
-end
-
--- Keep the banner glued to the terminal window: re-anchor whenever the window
--- moves, resizes, or changes screen. Cheap enough to run 20× a second.
-local function overlayFollow()
-  if overlay.dragging or not overlay.canvas or not overlay.canvas:isShowing() then return end
-  local f = overlayFrame()
-  local key = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
-  if key == overlay.lastKey then return end
-  overlay.lastKey = key
-  local cur = overlay.canvas:frame()
-  overlay.canvas:frame({ x = f.x, y = f.y, w = f.w, h = cur.h })
-end
-
-local function overlayShow(lines, color, seconds)
-  local f = overlayFrame()
-  local lineH, pad = 20, 10
-  local h = pad * 2 + lineH * #lines
-  if not overlay.canvas then
-    overlay.canvas = hs.canvas.new({ x = 0, y = 0, w = 10, h = 10 })
-    overlay.canvas:level(hs.canvas.windowLevels.floating)
-    overlay.canvas:behavior({ "canJoinAllSpaces", "stationary" })
-    overlay.canvas:clickActivating(false)
-    overlay.canvas:canvasMouseEvents(true, false, false, false)
-    overlay.canvas:mouseCallback(function(_, event) if event == "mouseDown" then startDrag() end end)
-    overlay.followTimer = hs.timer.doEvery(0.05, overlayFollow)
-  end
-  local c = overlay.canvas
-  if overlay.dragging then
-    local cur = c:frame()
-    f = { x = cur.x, y = cur.y, w = cur.w }
-  end
-  overlay.lastKey = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
-  c:frame({ x = f.x, y = f.y, w = f.w, h = h })
-  c:replaceElements({
-    { type = "rectangle", roundedRectRadii = { xRadius = 8, yRadius = 8 },
-      fillColor = { red = 0.08, green = 0.09, blue = 0.11, alpha = 0.92 },
-      strokeColor = { white = 1, alpha = 0.12 }, strokeWidth = 1, action = "strokeAndFill",
-      trackMouseDown = true },
-    { type = "circle", action = "fill", center = { x = pad + 6, y = pad + lineH / 2 }, radius = 5,
-      fillColor = color, trackMouseDown = true },
-  })
-  for i, line in ipairs(lines) do
-    c:appendElements({
-      type = "text", text = line,
-      frame = { x = pad + 20, y = pad + lineH * (i - 1), w = f.w - pad * 2 - 20, h = lineH },
-      textSize = 13, textColor = { white = 1, alpha = i == 1 and 1 or 0.75 },
-      textFont = "Menlo", textLineBreak = "truncateTail", trackMouseDown = true,
-    })
-  end
-  if not c:isShowing() then c:show(0.12) end
-  if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
-  if seconds and not M.config.bannerPinned then
-    overlay.hideTimer = hs.timer.doAfter(seconds, function() c:hide(0.25) end)
-  end
-end
-
-
-local function overlayHide()
-  if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
-  if overlay.canvas then overlay.canvas:hide(0.25) end
-end
--- Keep the banner on screen permanently (true) or let it fade (false).
-function M.pin(on)
-  M.config.bannerPinned = on ~= false
-  if not M.config.bannerPinned then overlayHide() end
-end
-
-
-local colors = {
-  listening = { red = 0.95, green = 0.26, blue = 0.21 },
-  working   = { red = 0.98, green = 0.75, blue = 0.18 },
-  done      = { red = 0.30, green = 0.80, blue = 0.45 },
-  error     = { red = 0.95, green = 0.26, blue = 0.21 },
-}
-
--- ---------------------------------------------------------------------------
--- Spoken feedback (macOS built-in voice, works offline)
-
-local speaker = nil
-local playing = nil
-local ttsCacheDir = home .. "/.voice-term/tts-cache"
-
--- edge-tts is a Python command-line client (pip3 install --user edge-tts).
-local function findEdgeTts()
-  local candidates = { "/opt/homebrew/bin/edge-tts", "/usr/local/bin/edge-tts" }
-  local pyDir = home .. "/Library/Python"
-  if hs.fs.attributes(pyDir) then
-    for entry in hs.fs.dir(pyDir) do
-      if entry ~= "." and entry ~= ".." then table.insert(candidates, pyDir .. "/" .. entry .. "/bin/edge-tts") end
-    end
-  end
-  for _, c in ipairs(candidates) do if hs.fs.attributes(c) then return c end end
-  return nil
-end
-local edgeTts = findEdgeTts()
-
--- Small stable hash so each phrase maps to one cached audio file.
-local function phraseHash(str)
-  local h = 5381
-  for i = 1, #str do h = (h * 33 + str:byte(i)) % 4294967296 end
-  return string.format("%08x", h)
-end
-
-local function playFile(path)
-  if playing then pcall(function() playing:stop() end) end
-  playing = hs.sound.getByFile(path)
-  if playing then playing:play() end
-end
-
--- Find an installed voice by its short name ("Tessa") or full identifier.
-local function voiceByName(name)
-  if not name or name == "" then return nil end
-  local ok, voices = pcall(hs.speech.availableVoices, true)
-  if not ok or not voices then return nil end
-  local needle = name:lower()
-  for _, id in ipairs(voices) do
-    if id:lower():find(needle, 1, true) then
-      local ok2, sp = pcall(hs.speech.new, id)
-      if ok2 and sp then return sp end
-    end
-  end
-  return nil
-end
-
-local function speakSystem(text)
-  if not speaker then
-    speaker = voiceByName(M.config.speakVoice) or hs.speech.new()
-    if not speaker then return end
-  end
-  if speaker:isSpeaking() then speaker:stop() end
-  speaker:speak(text)
-end
-
--- Synthesise with edge-tts into the cache, then play. Repeated phrases are
--- instant and work offline; a failure falls back to the macOS voice.
-local function speakEdge(text, onlyCache)
-  hs.fs.mkdir(ttsCacheDir)
-  local path = string.format("%s/%s-%s.mp3", ttsCacheDir, M.config.edgeVoice, phraseHash(text))
-  if hs.fs.attributes(path) then
-    if not onlyCache then playFile(path) end
-    return
-  end
-  local t = hs.task.new(edgeTts, function(code)
-    if code == 0 and hs.fs.attributes(path) then
-      if not onlyCache then playFile(path) end
-    else
-      os.remove(path)
-      if not onlyCache then speakSystem(text) end
-    end
-  end, { "--voice", M.config.edgeVoice, "--text", text, "--write-media", path })
-  t:setEnvironment(env)
-  t:start()
-end
-
-local function speak(text)
-  if not M.config.speak or not text or text == "" then return end
-  if M.config.tts == "edge" and edgeTts then speakEdge(text) else speakSystem(text) end
-end
-
--- Pre-synthesise the phrases said most often, one at a time, so they are
--- instant the first time they are needed.
-local warmPhrases = { "thinking", "didn't catch that", "cancelled", "new tab", "close tab", "clear",
-  "typed, press return to run", "Hyper is not in front", "next tab", "split" }
-function M.warmVoice()
-  if M.config.tts ~= "edge" or not edgeTts then return end
-  local i = 0
-  local function nextOne()
-    i = i + 1
-    if not warmPhrases[i] then return end
-    speakEdge(warmPhrases[i], true)
-    after(1.5, nextOne)
-  end
-  after(2, nextOne)
-end
-
--- Say something now, in the configured voice:  hs -c 'require("voice").say_text("habari")'
-function M.say_text(text) speak(text) end
-
--- Short, human wording of a plan for the voice: "new tab, then cd Desktop".
-local spokenAction = {
-  ["tab:new"] = "new tab", ["tab:close"] = "close tab", ["tab:next"] = "next tab", ["tab:prev"] = "previous tab",
-  ["window:new"] = "new window", ["tab:jump1"] = "tab one", ["tab:jump2"] = "tab two", ["tab:jump3"] = "tab three",
-  ["tab:jump4"] = "tab four", ["tab:jump5"] = "tab five", ["pane:splitVertical"] = "split", ["pane:splitHorizontal"] = "split down",
-  ["pane:next"] = "next pane", ["pane:prev"] = "previous pane", ["editor:clearBuffer"] = "clear",
-  ["editor:interrupt"] = "interrupt", ["editor:search"] = "search", ["window:reload"] = "reload",
-}
-
-local function spokenSummary(steps)
-  local parts = {}
-  for _, s in ipairs(steps) do
-    if s.kind == "KEYS" then table.insert(parts, spokenAction[s.arg] or s.arg)
-    elseif s.kind == "RUN" then table.insert(parts, (s.arg:gsub("~/", ""):gsub("[%p]", " ")))
-    elseif s.kind == "TYPE" then table.insert(parts, "typed, press return to run")
-    elseif s.kind == "OPEN" then table.insert(parts, "opening " .. s.arg)
-    elseif s.kind == "SAY" then table.insert(parts, s.arg)
-    end
-  end
-  return table.concat(parts, ", then ")
-end
-
--- ---------------------------------------------------------------------------
--- Volume ducking
-
-local savedVolume = nil
-
-local function duck()
-  local dev = hs.audiodevice.defaultOutputDevice()
-  if not dev then return end
-  savedVolume = dev:volume()
-  if savedVolume and savedVolume > M.config.duckVolume then dev:setVolume(M.config.duckVolume) end
-end
-
-local function unduck()
-  local dev = hs.audiodevice.defaultOutputDevice()
-  if dev and savedVolume then dev:setVolume(savedVolume) end
-  savedVolume = nil
-end
-
--- ---------------------------------------------------------------------------
--- Plans: parsing and execution
 
 local function parsePlan(text)
   local steps = {}
   if type(text) == "table" then
-    for _, s in ipairs(text) do
-      for _, sub in ipairs(parsePlan(s)) do table.insert(steps, sub) end
-    end
+    for _, s in ipairs(text) do for _, sub in ipairs(parsePlan(s)) do table.insert(steps, sub) end end
     return steps
   end
   for line in (text or ""):gmatch("[^\n]+") do
-    line = trim(line):gsub("^[%-%*%d%.]+%s+", "")
-    if line == "SAY_TIME" then line = "SAY It is " .. os.date("%I:%M %p"):gsub("^0", "") end
-    if line == "SAY_DATE" then line = "SAY Today is " .. os.date("%A, %d %B %Y") end
-    local kind, arg = line:match("^(%u+)%s+(.+)$")
-    if kind == "KEYS" and M.actions[trim(arg)] then
-      table.insert(steps, { kind = "KEYS", arg = trim(arg) })
-    elseif kind == "RUN" or kind == "TYPE" or kind == "OPEN" or kind == "SAY" then
-      table.insert(steps, { kind = kind, arg = trim(arg) })
-    end
+    local step = parseLine(line)
+    if step then table.insert(steps, step) end
   end
   return steps
 end
 
--- Commands an AI plan may never run unattended, whatever it claims.
-local risky = { "^rm ", " rm ", "sudo", "kill", "pkill", "killall", "git push", "git reset", "git checkout",
-  "git clean", "git rebase", "^mv ", " mv ", ">", "dd ", "chmod", "chown", "mkfs", "shutdown", "reboot",
-  "curl", "wget", "brew ", "npm i", "pnpm ", "yarn ", "pip ", "cargo install", "eval", "diskutil", "truncate" }
-
+local risky = { "^rm ", " rm ", "sudo", "kill", "pkill", "killall", "git push", "git reset", "git checkout", "git clean",
+  "git rebase", "^mv ", " mv ", ">", "dd ", "chmod", "chown", "mkfs", "shutdown", "reboot", "curl", "wget", "brew ",
+  "npm i", "pnpm ", "yarn ", "pip ", "cargo install", "eval", "diskutil", "truncate" }
 local function isRisky(cmd)
   local c = " " .. cmd:lower() .. " "
   for _, r in ipairs(risky) do
@@ -543,48 +217,42 @@ local function isRisky(cmd)
   return false
 end
 
+local function keyLabel(action)
+  local mods, key = table.unpack(M.actions[action])
+  local sym = { cmd = "⌘", ctrl = "⌃", shift = "⇧", alt = "⌥" }
+  local label = ""
+  for _, m in ipairs(mods) do label = label .. (sym[m] or m) end
+  return label .. key:upper()
+end
+
+local function describeStep(s)
+  if s.kind == "KEYS" then return keyLabel(s.arg) end
+  if s.kind == "RUN" then return s.arg .. " ↵" end
+  if s.kind == "TYPE" then return s.arg .. "  (press ↵ to run)" end
+  if s.kind == "OPEN" then return "open " .. s.arg end
+  return s.arg
+end
+
 local function describe(steps)
   local parts = {}
-  for _, s in ipairs(steps) do
-    if s.kind == "KEYS" then
-      local mods, key = table.unpack(M.actions[s.arg])
-      local sym = { cmd = "⌘", ctrl = "⌃", shift = "⇧", alt = "⌥" }
-      local label = ""
-      for _, m in ipairs(mods) do label = label .. (sym[m] or m) end
-      table.insert(parts, label .. key:upper())
-    elseif s.kind == "RUN" then table.insert(parts, s.arg .. " ↵")
-    elseif s.kind == "TYPE" then table.insert(parts, s.arg)
-    elseif s.kind == "OPEN" then table.insert(parts, "open " .. s.arg)
-    elseif s.kind == "SAY" then table.insert(parts, "“" .. s.arg .. "”")
-    end
-  end
+  for _, s in ipairs(steps) do table.insert(parts, describeStep(s)) end
   return table.concat(parts, "  ·  ")
 end
+
+local function spokenStep(s)
+  if s.kind == "KEYS" then return spokenAction[s.arg] or s.arg end
+  if s.kind == "RUN" then return (s.arg:gsub("~/", ""):gsub("[%p]", " ")) end
+  if s.kind == "TYPE" then return "typed, press return to run" end
+  if s.kind == "OPEN" then return "opening " .. s.arg end
+  return s.arg
+end
+
+-- ---------------------------------------------------------------------------
+-- Executing steps, one at a time, in order, with the Hyper-in-front guard
 
 local function focusTerminal()
   local app = hs.application.find(M.config.terminalApp)
   if app then app:activate(true) else hs.application.launchOrFocus(M.config.terminalApp) end
-end
-
-local function runStep(step)
-  if step.kind == "KEYS" then
-    local mods, key = table.unpack(M.actions[step.arg])
-    focusTerminal()
-    hs.eventtap.keyStroke(mods, key, 0)
-  elseif step.kind == "RUN" or step.kind == "TYPE" then
-    focusTerminal()
-    hs.eventtap.keyStrokes(step.arg)
-    if step.kind == "RUN" then hs.eventtap.keyStroke({}, "return", 0) end
-  elseif step.kind == "OPEN" then
-    hs.application.launchOrFocus(step.arg)
-  elseif step.kind == "SAY" then
-    -- spoken by executePlan's summary; nothing to press
-  end
-end
-
-local function needsTerminal(steps)
-  for _, s in ipairs(steps) do if s.kind ~= "OPEN" and s.kind ~= "SAY" then return true end end
-  return false
 end
 
 local function terminalInFront()
@@ -592,41 +260,72 @@ local function terminalInFront()
   return app and app:name() == M.config.terminalApp
 end
 
-local function executePlan(steps, heard, mode)
-  local summary = describe(steps)
-  local i = 0
-  local function nextStep()
-    i = i + 1
-    local step = steps[i]
-    if not step then return end
-    runStep(step)
-    after(M.config.stepDelay, nextStep)
+local function doStep(step)
+  if step.kind == "KEYS" then
+    local mods, key = table.unpack(M.actions[step.arg])
+    hs.eventtap.keyStroke(mods, key, 0)
+  elseif step.kind == "RUN" or step.kind == "TYPE" then
+    hs.eventtap.keyStrokes(step.arg)
+    if step.kind == "RUN" then hs.eventtap.keyStroke({}, "return", 0) end
+  elseif step.kind == "OPEN" then
+    hs.application.launchOrFocus(step.arg)
+  elseif step.kind == "SAY" then
+    speech.speak(step.arg)
   end
+end
+
+-- A queue so streamed lines run in order; terminal steps wait for Hyper to be in front.
+local queue = { items = {}, running = false, focused = false }
+
+local function runQueue()
+  if queue.running then return end
+  local step = table.remove(queue.items, 1)
+  if not step then return end
+  queue.running = true
+  local needsTerminal = step.kind == "KEYS" or step.kind == "RUN" or step.kind == "TYPE"
   local function go()
-    log(mode, heard, summary)
-    overlayShow({ "“" .. heard .. "”", summary }, colors.done, M.config.overlaySeconds)
-    speak(spokenSummary(steps))
-    nextStep()
+    doStep(step)
+    after(step.kind == "SAY" and 0.05 or M.config.stepDelay, function() queue.running = false; runQueue() end)
   end
-  if not needsTerminal(steps) then go(); return end
-  -- Never send keystrokes until Hyper is actually the frontmost app, or they
-  -- would land in whatever window the user is working in.
+  if not needsTerminal or queue.focused and terminalInFront() then go(); return end
   focusTerminal()
   local waited = 0
-  local poll
-  poll = hs.timer.doEvery(0.1, function()
-    timers.focusPoll = poll
+  timers.focusPoll = hs.timer.doEvery(0.1, function()
     waited = waited + 0.1
     if terminalInFront() then
-      poll:stop()
+      timers.focusPoll:stop(); timers.focusPoll = nil
+      queue.focused = true
       after(0.15, go)
     elseif waited >= M.config.focusTimeout then
-      poll:stop()
-      log(mode, heard, "ABORTED: " .. M.config.terminalApp .. " did not come to the front")
-      overlayShow({ "“" .. heard .. "”", "✗ " .. M.config.terminalApp .. " is not in front — nothing sent" }, colors.error, M.config.overlaySeconds)
-      speak(M.config.terminalApp .. " is not in front")
+      timers.focusPoll:stop(); timers.focusPoll = nil
+      queue.items, queue.running = {}, false
+      panel.add("hyper", "✗ " .. M.config.terminalApp .. " is not in front — nothing sent")
+      speech.speak(M.config.terminalApp .. " is not in front")
     end
   end)
+end
+
+local function enqueue(step)
+  table.insert(queue.items, step)
+  runQueue()
+end
+
+-- Run a whole local plan: show it, speak it, do it.
+local function executePlan(steps, heard)
+  queue.focused = false
+  local summary = describe(steps)
+  log("command", heard, summary)
+  panel.add("hyper", summary)
+  local hasSay = false
+  for _, s in ipairs(steps) do if s.kind == "SAY" then hasSay = true end end
+  if not hasSay then
+    local parts = {}
+    for _, s in ipairs(steps) do table.insert(parts, spokenStep(s)) end
+    speech.speak(table.concat(parts, ", then "))
+  end
+  for _, s in ipairs(steps) do enqueue(s) end
+  remember(heard, summary)
+  panel.clearStatus()
 end
 
 -- ---------------------------------------------------------------------------
@@ -657,8 +356,17 @@ local function matchPart(part)
     if M.places[place] then return parsePlan("RUN cd " .. M.places[place]) end
     return nil
   end
+  local proj = part:match("^open project (.+)$") or part:match("^open (.+) project$") or part:match("^go to project (.+)$")
+    or part:match("^project (.+)$")
+  if proj then
+    local name = projectMatch(proj)
+    if name then return parsePlan("RUN cd " .. projectsDir .. "/" .. name) end
+  end
+  if part == "run claude" or part == "start claude" or part == "open claude" then return parsePlan("RUN claude") end
   local app = part:match("^open (.+)$") or part:match("^launch (.+)$")
   if app and not app:find("tab") and not app:find("window") then
+    local name = projectMatch(app)
+    if name then return parsePlan("RUN cd " .. projectsDir .. "/" .. name) end
     return parsePlan("OPEN " .. app:gsub("^the ", ""))
   end
   return nil
@@ -666,21 +374,20 @@ end
 
 local function matchLocally(phrase)
   local plan = {}
-  local parts = {}
   for part in (phrase .. " and "):gmatch("(.-) and ") do
     part = trim(part:gsub("^then ", ""))
-    if part ~= "" then table.insert(parts, part) end
-  end
-  for _, part in ipairs(parts) do
-    local steps = matchPart(part)
-    if not steps then return nil end
-    for _, s in ipairs(steps) do table.insert(plan, s) end
+    if part ~= "" then
+      local steps = matchPart(part)
+      if not steps then return nil end
+      for _, s in ipairs(steps) do table.insert(plan, s) end
+    end
   end
   return #plan > 0 and plan or nil
 end
 
 -- ---------------------------------------------------------------------------
--- AI fallback
+-- AI path: lines stream in; SAY lines are spoken and shown as they complete,
+-- action lines run in order.
 
 local function actionList()
   local names = {}
@@ -689,124 +396,121 @@ local function actionList()
   return table.concat(names, ", ")
 end
 
-local aiPrompt = [[
-You control the Hyper terminal on macOS by voice. Turn the spoken request into a short plan: one step per line, in order, nothing else.
-Step types:
-KEYS <action>    press a terminal shortcut. Allowed actions: %s
-RUN <command>    type a zsh command and press Enter. Only for safe, read-only or navigation commands (cd, ls, pwd, cat, git status, git log, git diff, open, which, echo, mkdir).
-TYPE <command>   type a zsh command WITHOUT pressing Enter. Use for anything that deletes, moves, kills, installs, pushes, overwrites, or is ambiguous.
-OPEN <app name>  open a macOS application.
-SAY <sentence>   speak a reply. Use it to answer general questions, greet, or explain briefly (one or two short sentences), and to confirm when something cannot be done.
-Rules: reply with plan lines only, no explanation, no markdown, no numbering. Every request gets at least one line; if it is a question or chat, answer it with SAY.
-Context: %s
-Spoken request: "%s"]]
-
-local function finishAi(text, callback)
-  text = trim((text or ""):gsub("```%w*", ""))
-  if text == "" or text:upper() == "NONE" then callback(nil, "no action for that"); return end
-  local steps = parsePlan(text)
-  if #steps == 0 then callback(nil, "AI reply not understood: " .. text:sub(1, 60)); return end
-  for _, s in ipairs(steps) do
-    if s.kind == "RUN" and (not M.config.aiMayRun or isRisky(s.arg)) then s.kind = "TYPE" end
-  end
-  callback(steps)
+local function pretty(line)
+  local step = parseLine(line)
+  if step then return describeStep(step) end
+  return line
 end
 
-local function askHttp(prompt, callback)
-  local body = hs.json.encode({
-    model = M.config.aiModel,
-    temperature = 0,
-    messages = { { role = "user", content = prompt } },
+local function askAi(heard)
+  queue.focused = false
+  panel.status("thinking", "working", true)
+  speech.speak("thinking")
+  local done = {}
+  ai.ask(heard, history, {
+    onPartial = function(partial)
+      if partial == "" then return end
+      local shown = partial:gsub("^%u+%s+", "")
+      panel.streamSet(shown)
+    end,
+    onLine = function(line)
+      local step = parseLine(line)
+      panel.endStream()
+      if #done == 0 then panel.status("answering", "working", true) end
+      if not step then return end
+      if step.kind == "RUN" and (not M.config.aiMayRun or isRisky(step.arg)) then step.kind = "TYPE" end
+      panel.add("hyper", describeStep(step))
+      table.insert(done, describeStep(step))
+      enqueue(step)
+    end,
+    onDone = function(full)
+      panel.endStream()
+      panel.clearStatus()
+      if #done == 0 then
+        panel.add("hyper", "✗ I couldn't turn that into anything")
+        speech.speak("sorry, I couldn't turn that into anything")
+        log("command", heard, "ERROR unusable reply: " .. full:sub(1, 80))
+        return
+      end
+      local summary = table.concat(done, "  ·  ")
+      log("command", heard, summary)
+      remember(heard, summary)
+    end,
+    onError = function(msg)
+      panel.endStream()
+      panel.clearStatus()
+      panel.add("hyper", "✗ " .. (msg or "failed"))
+      speech.speak("sorry, that failed")
+      log("command", heard, "ERROR " .. (msg or ""))
+    end,
   })
-  local headers = { ["Content-Type"] = "application/json" }
-  if M.config.aiApiKey then headers["Authorization"] = "Bearer " .. M.config.aiApiKey end
-  hs.http.asyncPost(M.config.aiEndpoint, body, headers, function(status, reply)
-    if status ~= 200 then
-      callback(nil, "LLM endpoint returned " .. tostring(status) .. (status <= 0 and " — is it running?" or ""))
-      return
-    end
-    local ok, data = pcall(hs.json.decode, reply)
-    local content = ok and data and data.choices and data.choices[1] and data.choices[1].message
-      and data.choices[1].message.content
-    if not content then callback(nil, "LLM reply had no content"); return end
-    finishAi(content, callback)
-  end)
 end
 
-local function askAi(heard, callback)
-  local prompt = string.format(aiPrompt, actionList(), M.config.aiContext, heard)
-  local path, args
-  if M.config.ai == "http" then
-    overlayShow({ "“" .. heard .. "”", "thinking…" }, colors.working)
-    speak("thinking")
-    askHttp(prompt, callback)
-    return
-  elseif M.config.ai == "claude" and bin.claude then
-    path = bin.claude
-    args = { "-p", prompt, "--output-format", "text", "--tools", "" }
-    for _, a in ipairs(M.config.claudeArgs) do table.insert(args, a) end
-  elseif M.config.ai == "opencode" and bin.opencode then
-    path = bin.opencode
-    args = { "run", "--pure" }
-    for _, a in ipairs(M.config.opencodeArgs) do table.insert(args, a) end
-    table.insert(args, prompt)
-  else
-    callback(nil, "no AI configured — add the phrase to M.aliases")
-    return
-  end
-  overlayShow({ "“" .. heard .. "”", "thinking…" }, colors.working)
-  speak("thinking")
-  local t = hs.task.new(path, function(code, out, err)
-    if code ~= 0 then callback(nil, lastUsefulLine(err) ~= "" and lastUsefulLine(err) or lastUsefulLine(out)); return end
-    finishAi(out, callback)
-  end, args)
-  t:setEnvironment(env)
-  t:setWorkingDirectory(home)
-  t:start()
+local function stripName(heard)
+  local n = M.config.name:lower()
+  local h = heard:gsub("^%s*[Hh]ey[,%s]+", "")
+  local lower = h:lower()
+  if lower:sub(1, #n) == n then h = h:sub(#n + 1):gsub("^[,%s]+", "") end
+  return h ~= "" and h or heard
 end
 
 local function handleCommand(heard)
-  local phrase = normalize(heard)
-  local plan = matchLocally(phrase)
-  if plan then executePlan(plan, heard, "command"); return end
-  askAi(heard, function(steps, errMsg)
-    if not steps then
-      log("command", heard, "ERROR " .. (errMsg or ""))
-      overlayShow({ "“" .. heard .. "”", "✗ " .. (errMsg or "failed") }, colors.error, M.config.overlaySeconds)
-      speak("sorry, " .. (errMsg or "that failed"))
-      return
-    end
-    executePlan(steps, heard, "command")
-  end)
+  speech.stop()
+  heard = stripName(heard)
+  panel.add("you", heard)
+  local plan = matchLocally(normalize(heard))
+  if plan then executePlan(plan, heard) else askAi(heard) end
 end
 
 local function handleDictation(heard)
   log("dictate", heard, "typed")
-  overlayShow({ "“" .. heard .. "”", "typed" }, colors.done, M.config.overlaySeconds)
+  panel.add("you", heard)
+  panel.add("hyper", "typed", true)
+  panel.clearStatus()
   hs.eventtap.keyStrokes(heard)
 end
 
 -- ---------------------------------------------------------------------------
 -- Recording and transcribing
 
-local state = { mode = nil, task = nil, startedAt = nil, cancelled = false, handsFree = false,
-  switchToHandsFree = nil, maxTimer = nil }
+local state = { mode = nil, task = nil, startedAt = nil, cancelled = false, handsFree = false, switchToHandsFree = nil }
+local savedVolume = nil
+
+-- Lower the speakers while listening. The original level is captured once and
+-- kept until it is restored, so a quick tap-then-hands-free restart cannot
+-- mistake the ducked level for the original.
+local function duck()
+  local dev = hs.audiodevice.defaultOutputDevice()
+  if not dev then return end
+  if savedVolume == nil then
+    local v = dev:volume()
+    if not v or v <= M.config.duckVolume then return end
+    savedVolume = v
+  end
+  dev:setVolume(M.config.duckVolume)
+end
+
+local function unduck()
+  local dev = hs.audiodevice.defaultOutputDevice()
+  if dev and savedVolume then dev:setVolume(savedVolume) end
+  savedVolume = nil
+end
 
 local function transcribe(mode)
-  if not bin.whisper then overlayShow({ "whisper-cli not found — run install.sh" }, colors.error, 4); return end
-  if not hs.fs.attributes(M.config.model) then
-    overlayShow({ "speech model missing — run install.sh" }, colors.error, 4); return
-  end
-  overlayShow({ "transcribing…" }, colors.working)
+  if not bin.whisper then panel.status("whisper-cli not found — run install.sh", "error"); return end
+  if not hs.fs.attributes(M.config.model) then panel.status("speech model missing — run install.sh", "error"); return end
+  panel.status("transcribing", "working", true)
   local t = hs.task.new(bin.whisper, function(code, out, err)
     if code ~= 0 then
-      log(mode, "", "whisper failed: " .. lastUsefulLine(err))
-      overlayShow({ "✗ transcription failed — see ~/.voice-term/history.log" }, colors.error, 4)
+      log(mode, "", "whisper failed: " .. trim(err or ""))
+      panel.status("✗ transcription failed — see history.log", "error")
+      after(3, panel.clearStatus)
       return
     end
     local heard = trim((out or ""):gsub("%[.-%]", ""):gsub("%s+", " "))
     if heard == "" then
-      overlayShow({ "heard nothing" }, colors.error, 2); log(mode, "", "silence"); speak("didn't catch that"); return
+      panel.status("heard nothing", "error"); log(mode, "", "silence"); speech.speak("didn't catch that")
+      after(2, panel.clearStatus); return
     end
     if mode == "command" then handleCommand(heard) else handleDictation(heard) end
   end, { "-m", M.config.model, "-f", wavPath, "-l", "en", "-nt", "-np", "-t", "4" })
@@ -814,53 +518,46 @@ local function transcribe(mode)
   t:start()
 end
 
+local function stopRecording()
+  if not state.task then return end
+  unduck()
+  state.task:terminate()
+end
+
 local function startRecording(mode, handsFree)
   if state.mode then return end
-  if not bin.sox then overlayShow({ "sox not found — run install.sh" }, colors.error, 4); return end
+  if not bin.sox then panel.status("sox not found — run install.sh", "error"); return end
   os.remove(wavPath)
   state.mode, state.cancelled, state.startedAt = mode, false, hs.timer.secondsSinceEpoch()
   state.handsFree, state.switchToHandsFree = handsFree or false, nil
+  speech.stop()
   duck()
-  local title = mode == "command" and "listening — command" or "listening — dictation"
-  if handsFree then
-    overlayShow({ title .. " · hands-free", "stops when you pause · tap again to stop · any key cancels" }, colors.listening)
-  else
-    overlayShow({ title, "release to send · tap instead of hold for hands-free · any key cancels" }, colors.listening)
-  end
+  local title = mode == "command" and "listening" or "listening — dictation"
+  panel.status(handsFree and (title .. " · hands-free, stops when you pause · tap to stop") or (title .. " · release to send · tap for hands-free"), "listening")
   local args = { "-q", "-d", "-c", "1", "-r", "16000", "-b", "16", wavPath, "highpass", "100" }
   if handsFree then
-    -- sox waits for speech, then stops on the first pause of `pauseStop` seconds.
-    for _, a in ipairs({ "silence", "1", "0.1", M.config.pauseLevel, "1", tostring(M.config.pauseStop), M.config.pauseLevel }) do
-      table.insert(args, a)
-    end
-    state.maxTimer = hs.timer.doAfter(M.config.handsFreeMax, function()
-      if state.task and state.handsFree then stopRecording() end
-    end)
+    for _, a in ipairs({ "silence", "1", "0.1", M.config.pauseLevel, "1", tostring(M.config.pauseStop), M.config.pauseLevel }) do table.insert(args, a) end
+    timers.maxTimer = hs.timer.doAfter(M.config.handsFreeMax, function() if state.task and state.handsFree then stopRecording() end end)
   end
-  state.task = hs.task.new(bin.sox, function(code, out, err)
+  state.task = hs.task.new(bin.sox, function(_, _, err)
     local finished = state.mode
     local held = hs.timer.secondsSinceEpoch() - (state.startedAt or 0)
     local cancelled, switchTo = state.cancelled, state.switchToHandsFree
-    if state.maxTimer then state.maxTimer:stop(); state.maxTimer = nil end
+    if timers.maxTimer then timers.maxTimer:stop(); timers.maxTimer = nil end
     state.mode, state.task, state.startedAt, state.handsFree = nil, nil, nil, false
     if switchTo then startRecording(switchTo, true); return end
-    if cancelled then overlayShow({ "cancelled" }, colors.error, 1.5); return end
-    if held < M.config.minSeconds then overlayHide(); return end
+    if cancelled then panel.status("cancelled", "error"); after(1.5, panel.clearStatus); return end
+    if held < M.config.minSeconds then panel.clearStatus(); return end
     if not hs.fs.attributes(wavPath) then
-      log(finished, "", "no audio captured (mic permission?) " .. lastUsefulLine(err))
-      overlayShow({ "✗ no audio — allow Microphone for Hammerspoon" }, colors.error, 4)
+      log(finished, "", "no audio captured (mic permission?) " .. trim(err or ""))
+      panel.status("✗ no audio — allow Microphone for Hammerspoon", "error")
+      after(4, panel.clearStatus)
       return
     end
     transcribe(finished)
   end, args)
   state.task:setEnvironment(env)
   state.task:start()
-end
-
-local function stopRecording()
-  if not state.task then return end
-  unduck()
-  state.task:terminate()   -- SIGTERM: sox finalises the wav, then the callback above runs
 end
 
 local function cancelRecording()
@@ -870,7 +567,7 @@ local function cancelRecording()
 end
 
 -- ---------------------------------------------------------------------------
--- Key handling
+-- Keys
 
 local keyToMode = {
   [M.config.commandKey] = { mode = "command", flag = "alt" },
@@ -882,16 +579,12 @@ M.flagsTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, function(
   if not spec then return false end
   local down = e:getFlags()[spec.flag] == true
   if down then
-    if state.mode == spec.mode and state.handsFree then
-      stopRecording()                      -- second tap ends a hands-free session
-    elseif not state.mode then
-      startRecording(spec.mode)
-    end
+    if state.mode == spec.mode and state.handsFree then stopRecording()
+    elseif not state.mode then startRecording(spec.mode) end
   elseif not down and state.mode == spec.mode and not state.handsFree then
     local held = hs.timer.secondsSinceEpoch() - (state.startedAt or 0)
     if M.config.tapToTalk and held < M.config.minSeconds then
-      state.switchToHandsFree = spec.mode  -- a quick tap: restart in hands-free mode
-      unduck()
+      state.switchToHandsFree = spec.mode   -- stay ducked across the restart
       state.task:terminate()
     else
       stopRecording()
@@ -900,28 +593,26 @@ M.flagsTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, function(
   return false
 end)
 
-M.keyTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(e)
+M.keyTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function()
   if state.mode then cancelRecording() end
   return false
 end)
 
--- Run a phrase as if it had been spoken (for testing from the hs CLI):
---   hs -c 'require("voice").say("open a new tab and go to desktop")'
-function M.say(phrase) handleCommand(phrase) end
+-- ---------------------------------------------------------------------------
+-- Hooks for testing from the hs command line
 
--- Show the banner on demand, to check where it sits:
---   hs -c 'require("voice").banner("hello from voice")'
-function M.banner(text, seconds)
-  overlayShow({ text or "voice banner test", "attached to the " .. M.config.terminalApp .. " window" }, colors.done, seconds or 4)
-end
-
--- Dry run: what a phrase would do, without doing it. Local matches only (no AI).
---   hs -c 'return require("voice").plan("open a new hyper tab and cd to desktop")'
-function M.plan(phrase)
-  local steps = matchLocally(normalize(phrase))
+function M.say(phrase) handleCommand(phrase) end                      -- run a phrase as if spoken
+function M.plan(phrase)                                               -- dry run, local matches only
+  local steps = matchLocally(normalize(stripName(phrase)))
   if not steps then return "no local match → would ask the AI" end
-  return describe(steps) .. "   (speaks: " .. spokenSummary(steps) .. ")"
+  return describe(steps)
 end
+function M.say_text(text) speech.speak(text) end                      -- try the voice
+function M.banner(text) panel.add("hyper", text or "banner test") end -- show the panel
+function M.pin(on) M.config.panelPinned = on ~= false; panel.pin(on) end
+function M.resetBanner() panel.resetPosition() end
+function M.panelFrame() local f = panel.frame(); return f and string.format("%d,%d,%d,%d", f.x, f.y, f.w, f.h) or "hidden" end
+function M.forget() history = {} end                                  -- clear conversation memory
 
 local function startTaps()
   M.flagsTap:start()
@@ -929,21 +620,27 @@ local function startTaps()
   local missing = {}
   for _, n in ipairs({ "sox", "whisper" }) do if not bin[n] then table.insert(missing, n) end end
   if #missing > 0 then
-    overlayShow({ "voice: missing " .. table.concat(missing, ", ") .. " — run install.sh" }, colors.error, 6)
+    panel.status("voice: missing " .. table.concat(missing, ", ") .. " — run install.sh", "error")
   else
-    overlayShow({ "voice ready", "hold Right ⌥ to command · Right ⌘ to dictate" }, colors.done, 3)
+    panel.status(M.config.name .. " ready — hold or tap Right ⌥ to talk", "done")
+    after(3, panel.clearStatus)
   end
 end
 
 function M.start()
   hs.fs.mkdir(logDir)
-  M.warmVoice()
+  panel.configure({ terminalApp = M.config.terminalApp, lines = M.config.panelLines, seconds = M.config.panelSeconds, pinned = M.config.panelPinned, botLabel = M.config.name:lower() })
+  speech.configure({ enabled = M.config.speak, tts = M.config.tts, edgeVoice = M.config.edgeVoice, systemVoice = M.config.speakVoice })
+  ai.configure({ ai = M.config.ai, claudeArgs = M.config.claudeArgs, opencodeArgs = M.config.opencodeArgs,
+    aiEndpoint = M.config.aiEndpoint, aiModel = M.config.aiModel, aiApiKey = M.config.aiApiKey,
+    context = "Your name is " .. M.config.name .. ". " .. M.config.aiContext .. " Project folders under ~/Desktop/projects: " .. table.concat(projectNames(), ", ") ..
+      ". 'run claude' means RUN claude; 'run opencode' means RUN opencode.", actions = actionList() })
+  speech.warm({ "thinking", "didn't catch that", "cancelled", "new tab", "close tab", "clear",
+    "typed, press return to run", "Hyper is not in front", "next tab", "split", "sorry, that failed" })
   if hs.accessibilityState(true) then startTaps(); return end
-  -- Accessibility not granted yet: macOS has just shown its prompt. Poll until
-  -- the user allows Hammerspoon, then start without needing a manual reload.
-  overlayShow({ "allow Hammerspoon under Accessibility — it starts by itself after" }, colors.working, 8)
-  M.waitTimer = hs.timer.doEvery(2, function()
-    if hs.accessibilityState() then M.waitTimer:stop(); startTaps() end
+  panel.status("allow Hammerspoon under Accessibility — it starts by itself after", "working")
+  timers.wait = hs.timer.doEvery(2, function()
+    if hs.accessibilityState() then timers.wait:stop(); startTaps() end
   end)
 end
 

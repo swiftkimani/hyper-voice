@@ -20,7 +20,7 @@ if [ ! -f "$MODEL" ] || [ "$(stat -f%z "$MODEL")" -ne "$MODEL_SIZE" ]; then
   curl -L --fail -C - --retry 10 --retry-delay 5 -o "$MODEL" "$MODEL_URL"
 fi
 
-cp "$here/voice.lua" ~/.hammerspoon/voice.lua
+cp "$here"/voice*.lua ~/.hammerspoon/
 touch ~/.hammerspoon/init.lua
 grep -q 'require("voice")' ~/.hammerspoon/init.lua || echo 'require("voice")' >> ~/.hammerspoon/init.lua
 
