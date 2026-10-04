@@ -34,7 +34,7 @@ M.config = {
   overlaySeconds = 4,                  -- how long the result stays on screen
   stepDelay = 0.22,                    -- pause between steps of a plan (seconds)
   speak = true,                        -- say a short confirmation out loud (macOS voice, offline)
-  speakVoice = nil,                    -- nil = system default; see `say -v ?` for names
+  speakVoice = "Tessa",                -- South African English; falls back to the system voice if missing. `say -v ?` lists names
   focusTimeout = 4,                    -- seconds to wait for Hyper to come to the front
   tapToTalk = true,                    -- a quick tap (not hold) starts hands-free listening
   pauseStop = 1.5,                     -- hands-free: stop after this many seconds of silence
@@ -194,7 +194,8 @@ end
 -- ---------------------------------------------------------------------------
 -- Overlay: a small banner at the top centre of the Hyper window (or the screen)
 
-local overlay = { canvas = nil, hideTimer = nil, followTimer = nil, lastKey = nil }
+local overlay = { canvas = nil, hideTimer = nil, followTimer = nil, lastKey = nil, dragging = false, dragTap = nil }
+local OFFSET_KEY = "voice.bannerOffset"
 
 local function terminalWindow()
   local app = hs.application.find(M.config.terminalApp)
@@ -204,17 +205,62 @@ local function terminalWindow()
   return nil
 end
 
+-- Where the banner goes: top centre of the terminal window by default, or
+-- wherever it was last dragged to (an offset from the window's top-left corner).
 local function overlayFrame()
   local target = terminalWindow() or hs.window.frontmostWindow()
   local f = target and target:frame() or hs.screen.mainScreen():frame()
   local w = math.min(640, math.max(320, f.w - 40))
+  local off = hs.settings.get(OFFSET_KEY)
+  if off and off.dx and off.dy then
+    local x = f.x + math.max(0, math.min(off.dx, f.w - w))
+    local y = f.y + math.max(0, math.min(off.dy, f.h - 44))
+    return { x = x, y = y, w = w }
+  end
   return { x = f.x + (f.w - w) / 2, y = f.y + 8, w = w }
+end
+
+local function rememberOffset()
+  local win = terminalWindow()
+  if not win or not overlay.canvas then return end
+  local wf, cf = win:frame(), overlay.canvas:frame()
+  hs.settings.set(OFFSET_KEY, { dx = cf.x - wf.x, dy = cf.y - wf.y })
+end
+
+-- Drag the banner with the mouse. A global tap follows the pointer even when
+-- it outruns the banner, and the drop position is remembered relative to the window.
+local function startDrag()
+  if overlay.dragging or not overlay.canvas then return end
+  overlay.dragging = true
+  if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
+  local startMouse, startFrame = hs.mouse.absolutePosition(), overlay.canvas:frame()
+  local types = hs.eventtap.event.types
+  overlay.dragTap = hs.eventtap.new({ types.leftMouseDragged, types.leftMouseUp }, function(e)
+    local m = hs.mouse.absolutePosition()
+    if e:getType() == types.leftMouseDragged then
+      overlay.canvas:frame({ x = startFrame.x + (m.x - startMouse.x), y = startFrame.y + (m.y - startMouse.y),
+        w = startFrame.w, h = startFrame.h })
+      return true
+    end
+    overlay.dragTap:stop(); overlay.dragTap = nil
+    overlay.dragging, overlay.lastKey = false, nil
+    rememberOffset()
+    overlay.hideTimer = hs.timer.doAfter(M.config.overlaySeconds, function() overlay.canvas:hide(0.25) end)
+    return true
+  end)
+  overlay.dragTap:start()
+end
+
+-- Forget the dragged position and go back to the top centre.
+function M.resetBanner()
+  hs.settings.clear(OFFSET_KEY)
+  overlay.lastKey = nil
 end
 
 -- Keep the banner glued to the terminal window: re-anchor whenever the window
 -- moves, resizes, or changes screen. Cheap enough to run 20× a second.
 local function overlayFollow()
-  if not overlay.canvas or not overlay.canvas:isShowing() then return end
+  if overlay.dragging or not overlay.canvas or not overlay.canvas:isShowing() then return end
   local f = overlayFrame()
   local key = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
   if key == overlay.lastKey then return end
@@ -231,9 +277,16 @@ local function overlayShow(lines, color, seconds)
     overlay.canvas = hs.canvas.new({ x = 0, y = 0, w = 10, h = 10 })
     overlay.canvas:level(hs.canvas.windowLevels.floating)
     overlay.canvas:behavior({ "canJoinAllSpaces", "stationary" })
+    overlay.canvas:clickActivating(false)
+    overlay.canvas:canvasMouseEvents(true, false, false, false)
+    overlay.canvas:mouseCallback(function(_, event) if event == "mouseDown" then startDrag() end end)
     overlay.followTimer = hs.timer.doEvery(0.05, overlayFollow)
   end
   local c = overlay.canvas
+  if overlay.dragging then
+    local cur = c:frame()
+    f = { x = cur.x, y = cur.y, w = cur.w }
+  end
   overlay.lastKey = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
   c:frame({ x = f.x, y = f.y, w = f.w, h = h })
   c:replaceElements({
@@ -275,11 +328,25 @@ local colors = {
 
 local speaker = nil
 
+-- Find an installed voice by its short name ("Tessa") or full identifier.
+local function voiceByName(name)
+  if not name or name == "" then return nil end
+  local ok, voices = pcall(hs.speech.availableVoices, true)
+  if not ok or not voices then return nil end
+  local needle = name:lower()
+  for _, id in ipairs(voices) do
+    if id:lower():find(needle, 1, true) then
+      local ok2, sp = pcall(hs.speech.new, id)
+      if ok2 and sp then return sp end
+    end
+  end
+  return nil
+end
+
 local function speak(text)
   if not M.config.speak or not text or text == "" then return end
   if not speaker then
-    -- hs.speech.new(nil) throws; only pass a voice when one is configured.
-    speaker = M.config.speakVoice and hs.speech.new(M.config.speakVoice) or hs.speech.new()
+    speaker = voiceByName(M.config.speakVoice) or hs.speech.new()
     if not speaker then return end
   end
   if speaker:isSpeaking() then speaker:stop() end
@@ -723,6 +790,12 @@ end)
 -- Run a phrase as if it had been spoken (for testing from the hs CLI):
 --   hs -c 'require("voice").say("open a new tab and go to desktop")'
 function M.say(phrase) handleCommand(phrase) end
+
+-- Show the banner on demand, to check where it sits:
+--   hs -c 'require("voice").banner("hello from voice")'
+function M.banner(text, seconds)
+  overlayShow({ text or "voice banner test", "attached to the " .. M.config.terminalApp .. " window" }, colors.done, seconds or 4)
+end
 
 -- Dry run: what a phrase would do, without doing it. Local matches only (no AI).
 --   hs -c 'return require("voice").plan("open a new hyper tab and cd to desktop")'

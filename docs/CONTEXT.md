@@ -21,6 +21,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 | Cross-platform / MCP server | ⬜ not started | see Next |
 
 ## Done (most recent first)
+- 2026-10-04 draggable banner with remembered offset per window; Tessa (en_ZA) default voice with fallback; `banner()` test hook
 - 2026-10-04 banner follows the Hyper window (20 Hz re-anchor, fades); claude -p start-up flags (12 s → ~5 s); tab one–five; speech crash fix
 - 2026-10-04 tap-to-talk hands-free, spoken feedback, `http` LLM provider, frontmost guard, filler words, `plan()` dry run
 - 2026-10-04 overlay banner, Hyper actions, plan steps, local chaining, `say()` test hook
@@ -53,6 +54,7 @@ Reliable hands-free control of Hyper: shortcuts, navigation, and free-form comma
 - `claude` is logged in via the Keychain; `opencode` is optional.
 
 ## Known issues
+- No Kenyan English or Swahili voice ships with macOS. Tessa (South African) is the nearest offline voice. A cloud TTS provider (Azure en-KE voices) would need an API key; not built.
 - Hands-free auto-stop depends on `pauseLevel`; in a loud room it may run to `handsFreeMax` (20 s) before stopping.
 - Free-form requests take as long as a `claude -p` round trip: ~4–6 s with the start-up flags, more on a slow network. `--bare` would be faster still but cannot see the Keychain login.
 - Bluetooth headsets without volume control skip the ducking step.

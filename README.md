@@ -2,7 +2,7 @@
 
 Push-to-talk voice control for the [Hyper](https://hyper.is) terminal on macOS, plus dictation into any app.
 
-Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. What was heard and what was done appears in a small banner glued to the top of the Hyper window; it follows the window when you move or resize it and fades out after a few seconds.
+Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. What was heard and what was done appears in a small banner glued to the Hyper window. It follows the window when you move or resize it, fades out after a few seconds, and you can drag it to wherever you like on the window; it remembers that spot. `hs -c 'require("voice").resetBanner()'` puts it back at the top centre.
 
 Everything runs locally and costs nothing: [Hammerspoon](https://www.hammerspoon.org) listens for the key, [sox](https://sox.sourceforge.net) records the mic, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) turns speech into text offline, and the built-in macOS voice talks back. Phrases are matched locally first. Anything unmatched is turned into a short plan by an LLM: [Claude Code](https://claude.com/claude-code) (`claude -p`), [opencode](https://opencode.ai), or any OpenAI-compatible endpoint such as [Ollama](https://ollama.com) running a local model.
 
@@ -17,7 +17,7 @@ Everything runs locally and costs nothing: [Hammerspoon](https://www.hammerspoon
 
 While it listens, speaker volume drops to 10% and comes back after, so music is not a problem. There is no wake word on purpose: meeting chatter or a podcast cannot trigger it, and nothing is said aloud to start it. In a call, mute yourself in Zoom or Teams first, or the meeting hears you.
 
-It talks back with the macOS voice: "new tab, then cd Desktop", "typed, press return to run", "didn't catch that". Set `speak = false` to silence it, or `speakVoice = "Daniel"` to pick a voice (`say -v ?` lists them).
+It talks back: "new tab, then cd Desktop", "typed, press return to run", "didn't catch that". The default voice is Tessa, macOS's South African English voice, with a fallback to the system voice if it is not installed. Set `speak = false` to silence it, or `speakVoice = "Daniel"` to pick another (`say -v ?` lists them). For a better Tessa, download the Enhanced version under System Settings → Accessibility → Spoken Content → System Voice → Manage Voices. macOS ships no Kenyan English or Swahili voice; the closest offline option is Tessa. Cloud voices such as Azure's en-KE Asilia and Chilemba exist but need an account and a key.
 
 ## What you can say
 
@@ -86,7 +86,7 @@ Edit `~/.hammerspoon/voice.lua`, then Reload Config from the Hammerspoon menu-ba
 | `aiMayRun` | `true` | Let AI plans press Enter on commands marked safe. `false` types everything. |
 | `tapToTalk` | `true` | A quick tap starts hands-free listening. |
 | `pauseStop` / `pauseLevel` | 1.5 / `"2%"` | Hands-free: stop after this pause; raise the level in noisy rooms. |
-| `speak` / `speakVoice` | `true` / system | Spoken confirmations. |
+| `speak` / `speakVoice` | `true` / `"Tessa"` | Spoken confirmations and which voice says them. |
 | `commandKey` / `dictateKey` | 61 / 54 | Right ⌥ / Right ⌘. Left ⌥ = 58, Left ⌘ = 55. |
 | `duckVolume` | 10 | Speaker volume while listening. |
 | `aiContext` | one sentence | Context given to the AI with every request. |
