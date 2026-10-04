@@ -216,7 +216,7 @@ end
 local function overlayFollow()
   if not overlay.canvas or not overlay.canvas:isShowing() then return end
   local f = overlayFrame()
-  local key = string.format("%d,%d,%d", f.x, f.y, f.w)
+  local key = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
   if key == overlay.lastKey then return end
   overlay.lastKey = key
   local cur = overlay.canvas:frame()
@@ -234,7 +234,7 @@ local function overlayShow(lines, color, seconds)
     overlay.followTimer = hs.timer.doEvery(0.05, overlayFollow)
   end
   local c = overlay.canvas
-  overlay.lastKey = string.format("%d,%d,%d", f.x, f.y, f.w)
+  overlay.lastKey = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
   c:frame({ x = f.x, y = f.y, w = f.w, h = h })
   c:replaceElements({
     { type = "rectangle", action = "fill", roundedRectRadii = { xRadius = 8, yRadius = 8 },
