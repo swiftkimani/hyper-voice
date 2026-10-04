@@ -256,7 +256,8 @@ local speaker = nil
 local function speak(text)
   if not M.config.speak or not text or text == "" then return end
   if not speaker then
-    speaker = hs.speech.new(M.config.speakVoice)
+    -- hs.speech.new(nil) throws; only pass a voice when one is configured.
+    speaker = M.config.speakVoice and hs.speech.new(M.config.speakVoice) or hs.speech.new()
     if not speaker then return end
   end
   if speaker:isSpeaking() then speaker:stop() end
