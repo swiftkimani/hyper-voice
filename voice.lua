@@ -230,7 +230,7 @@ local function overlayShow(lines, color, seconds)
   if not overlay.canvas then
     overlay.canvas = hs.canvas.new({ x = 0, y = 0, w = 10, h = 10 })
     overlay.canvas:level(hs.canvas.windowLevels.floating)
-    overlay.canvas:behavior({ "canJoinAllSpaces", "moveToActiveSpace" })
+    overlay.canvas:behavior({ "canJoinAllSpaces", "stationary" })
     overlay.followTimer = hs.timer.doEvery(0.05, overlayFollow)
   end
   local c = overlay.canvas
