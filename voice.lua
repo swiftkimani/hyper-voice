@@ -21,9 +21,12 @@ M.config = {
   opencodeArgs = {},                   -- e.g. { "-m", "anthropic/claude-haiku-4-5" }
   -- ai = "http": any OpenAI-compatible chat endpoint. Works with Ollama (free, local),
   -- LM Studio, OpenAI, Groq, OpenRouter, Gemini's compatibility endpoint, etc.
+  -- Fastest free option: Groq (https://console.groq.com, free key) — about half a second per request:
+  --   ai = "http", aiEndpoint = "https://api.groq.com/openai/v1/chat/completions",
+  --   aiModel = "llama-3.1-8b-instant", aiApiKey = "gsk_…"
   aiEndpoint = "http://127.0.0.1:11434/v1/chat/completions",
   aiModel = "llama3.2",
-  aiApiKey = nil,                      -- or os.getenv("OPENAI_API_KEY") etc.
+  aiApiKey = nil,
   model = home .. "/.voice-term/models/ggml-small.en.bin",
   terminalApp = "Hyper",
   commandKey = 61,                     -- right ⌥   (left ⌥ = 58)
@@ -32,12 +35,15 @@ M.config = {
   minSeconds = 0.4,                    -- shorter holds are ignored as accidental taps
   aiMayRun = true,                     -- let AI plans press Enter on commands it marks safe
   overlaySeconds = 4,                  -- how long the result stays on screen
+  bannerPinned = false,                -- true: the banner never auto-hides (last result stays visible)
   stepDelay = 0.22,                    -- pause between steps of a plan (seconds)
-  speak = true,                        -- say a short confirmation out loud (macOS voice, offline)
-  speakVoice = "Tessa",                -- South African English; falls back to the system voice if missing. `say -v ?` lists names
+  speak = true,                        -- say a short confirmation out loud
+  tts = "edge",                        -- "edge": Kenyan voices via edge-tts (online, cached) | "system": macOS voice (offline)
+  edgeVoice = "en-KE-AsiliaNeural",    -- en-KE-AsiliaNeural (f) · en-KE-ChilembaNeural (m) · sw-KE-ZuriNeural (f) · sw-KE-RafikiNeural (m)
+  speakVoice = "Tessa",                -- macOS fallback voice (South African English); nil = system default. `say -v ?` lists names
   focusTimeout = 4,                    -- seconds to wait for Hyper to come to the front
   tapToTalk = true,                    -- a quick tap (not hold) starts hands-free listening
-  pauseStop = 1.5,                     -- hands-free: stop after this many seconds of silence
+  pauseStop = 1.0,                     -- hands-free: stop after this many seconds of silence
   pauseLevel = "2%",                   -- hands-free: what counts as silence (raise in noisy rooms)
   handsFreeMax = 20,                   -- hands-free: hard stop after this many seconds
   aiContext = "Projects live in ~/Desktop/projects. Home folders: ~/Desktop, ~/Downloads, ~/Documents.",
@@ -70,9 +76,19 @@ M.actions = {
 --   RUN  <command>    type a shell command into Hyper and press Enter
 --   TYPE <command>    type a shell command into Hyper, do NOT press Enter
 --   OPEN <app name>   open a macOS app
+--   SAY  <sentence>   answer out loud (general questions, greetings, confirmations)
 
 -- Exact phrases (lower-case, no punctuation). Value: a step, or a table of steps.
 M.aliases = {
+  ["hello"]           = "SAY Hello. I'm listening.",
+  ["hi"]              = "SAY Hi. What do you need?",
+  ["thank you"]       = "SAY You're welcome.",
+  ["thanks"]          = "SAY Any time.",
+  ["what time is it"] = "SAY_TIME",
+  ["what is the time"] = "SAY_TIME",
+  ["what is the date"] = "SAY_DATE",
+  ["what day is it"]  = "SAY_DATE",
+  ["what can you do"] = "SAY I control Hyper by voice: tabs, panes, folders, git, and any command you describe. I can also answer questions.",
   ["go home"]         = "RUN cd ~",
   ["go back"]         = "RUN cd -",
   ["go up"]           = "RUN cd ..",
@@ -138,6 +154,17 @@ M.places = {
 }
 
 -- ---------------------------------------------------------------------------
+
+-- Timers must stay referenced or Hammerspoon's garbage collector can cancel them.
+local timers = {}
+local function after(seconds, fn)
+  local id = #timers + 1
+  timers[id] = hs.timer.doAfter(seconds, function()
+    timers[id] = nil
+    fn()
+  end)
+  return timers[id]
+end
 
 local logDir  = home .. "/.voice-term"
 local wavPath = logDir .. "/last.wav"
@@ -245,7 +272,9 @@ local function startDrag()
     overlay.dragTap:stop(); overlay.dragTap = nil
     overlay.dragging, overlay.lastKey = false, nil
     rememberOffset()
-    overlay.hideTimer = hs.timer.doAfter(M.config.overlaySeconds, function() overlay.canvas:hide(0.25) end)
+    if not M.config.bannerPinned then
+      overlay.hideTimer = hs.timer.doAfter(M.config.overlaySeconds, function() overlay.canvas:hide(0.25) end)
+    end
     return true
   end)
   overlay.dragTap:start()
@@ -290,31 +319,39 @@ local function overlayShow(lines, color, seconds)
   overlay.lastKey = string.format("%d,%d,%d", math.floor(f.x), math.floor(f.y), math.floor(f.w))
   c:frame({ x = f.x, y = f.y, w = f.w, h = h })
   c:replaceElements({
-    { type = "rectangle", action = "fill", roundedRectRadii = { xRadius = 8, yRadius = 8 },
+    { type = "rectangle", roundedRectRadii = { xRadius = 8, yRadius = 8 },
       fillColor = { red = 0.08, green = 0.09, blue = 0.11, alpha = 0.92 },
-      strokeColor = { white = 1, alpha = 0.12 }, strokeWidth = 1, action = "strokeAndFill" },
+      strokeColor = { white = 1, alpha = 0.12 }, strokeWidth = 1, action = "strokeAndFill",
+      trackMouseDown = true },
     { type = "circle", action = "fill", center = { x = pad + 6, y = pad + lineH / 2 }, radius = 5,
-      fillColor = color },
+      fillColor = color, trackMouseDown = true },
   })
   for i, line in ipairs(lines) do
     c:appendElements({
       type = "text", text = line,
       frame = { x = pad + 20, y = pad + lineH * (i - 1), w = f.w - pad * 2 - 20, h = lineH },
       textSize = 13, textColor = { white = 1, alpha = i == 1 and 1 or 0.75 },
-      textFont = "Menlo", textLineBreak = "truncateTail",
+      textFont = "Menlo", textLineBreak = "truncateTail", trackMouseDown = true,
     })
   end
   if not c:isShowing() then c:show(0.12) end
   if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
-  if seconds then
+  if seconds and not M.config.bannerPinned then
     overlay.hideTimer = hs.timer.doAfter(seconds, function() c:hide(0.25) end)
   end
 end
+
 
 local function overlayHide()
   if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
   if overlay.canvas then overlay.canvas:hide(0.25) end
 end
+-- Keep the banner on screen permanently (true) or let it fade (false).
+function M.pin(on)
+  M.config.bannerPinned = on ~= false
+  if not M.config.bannerPinned then overlayHide() end
+end
+
 
 local colors = {
   listening = { red = 0.95, green = 0.26, blue = 0.21 },
@@ -327,6 +364,35 @@ local colors = {
 -- Spoken feedback (macOS built-in voice, works offline)
 
 local speaker = nil
+local playing = nil
+local ttsCacheDir = home .. "/.voice-term/tts-cache"
+
+-- edge-tts is a Python command-line client (pip3 install --user edge-tts).
+local function findEdgeTts()
+  local candidates = { "/opt/homebrew/bin/edge-tts", "/usr/local/bin/edge-tts" }
+  local pyDir = home .. "/Library/Python"
+  if hs.fs.attributes(pyDir) then
+    for entry in hs.fs.dir(pyDir) do
+      if entry ~= "." and entry ~= ".." then table.insert(candidates, pyDir .. "/" .. entry .. "/bin/edge-tts") end
+    end
+  end
+  for _, c in ipairs(candidates) do if hs.fs.attributes(c) then return c end end
+  return nil
+end
+local edgeTts = findEdgeTts()
+
+-- Small stable hash so each phrase maps to one cached audio file.
+local function phraseHash(str)
+  local h = 5381
+  for i = 1, #str do h = (h * 33 + str:byte(i)) % 4294967296 end
+  return string.format("%08x", h)
+end
+
+local function playFile(path)
+  if playing then pcall(function() playing:stop() end) end
+  playing = hs.sound.getByFile(path)
+  if playing then playing:play() end
+end
 
 -- Find an installed voice by its short name ("Tessa") or full identifier.
 local function voiceByName(name)
@@ -343,8 +409,7 @@ local function voiceByName(name)
   return nil
 end
 
-local function speak(text)
-  if not M.config.speak or not text or text == "" then return end
+local function speakSystem(text)
   if not speaker then
     speaker = voiceByName(M.config.speakVoice) or hs.speech.new()
     if not speaker then return end
@@ -352,6 +417,51 @@ local function speak(text)
   if speaker:isSpeaking() then speaker:stop() end
   speaker:speak(text)
 end
+
+-- Synthesise with edge-tts into the cache, then play. Repeated phrases are
+-- instant and work offline; a failure falls back to the macOS voice.
+local function speakEdge(text, onlyCache)
+  hs.fs.mkdir(ttsCacheDir)
+  local path = string.format("%s/%s-%s.mp3", ttsCacheDir, M.config.edgeVoice, phraseHash(text))
+  if hs.fs.attributes(path) then
+    if not onlyCache then playFile(path) end
+    return
+  end
+  local t = hs.task.new(edgeTts, function(code)
+    if code == 0 and hs.fs.attributes(path) then
+      if not onlyCache then playFile(path) end
+    else
+      os.remove(path)
+      if not onlyCache then speakSystem(text) end
+    end
+  end, { "--voice", M.config.edgeVoice, "--text", text, "--write-media", path })
+  t:setEnvironment(env)
+  t:start()
+end
+
+local function speak(text)
+  if not M.config.speak or not text or text == "" then return end
+  if M.config.tts == "edge" and edgeTts then speakEdge(text) else speakSystem(text) end
+end
+
+-- Pre-synthesise the phrases said most often, one at a time, so they are
+-- instant the first time they are needed.
+local warmPhrases = { "thinking", "didn't catch that", "cancelled", "new tab", "close tab", "clear",
+  "typed, press return to run", "Hyper is not in front", "next tab", "split" }
+function M.warmVoice()
+  if M.config.tts ~= "edge" or not edgeTts then return end
+  local i = 0
+  local function nextOne()
+    i = i + 1
+    if not warmPhrases[i] then return end
+    speakEdge(warmPhrases[i], true)
+    after(1.5, nextOne)
+  end
+  after(2, nextOne)
+end
+
+-- Say something now, in the configured voice:  hs -c 'require("voice").say_text("habari")'
+function M.say_text(text) speak(text) end
 
 -- Short, human wording of a plan for the voice: "new tab, then cd Desktop".
 local spokenAction = {
@@ -369,6 +479,7 @@ local function spokenSummary(steps)
     elseif s.kind == "RUN" then table.insert(parts, (s.arg:gsub("~/", ""):gsub("[%p]", " ")))
     elseif s.kind == "TYPE" then table.insert(parts, "typed, press return to run")
     elseif s.kind == "OPEN" then table.insert(parts, "opening " .. s.arg)
+    elseif s.kind == "SAY" then table.insert(parts, s.arg)
     end
   end
   return table.concat(parts, ", then ")
@@ -405,10 +516,12 @@ local function parsePlan(text)
   end
   for line in (text or ""):gmatch("[^\n]+") do
     line = trim(line):gsub("^[%-%*%d%.]+%s+", "")
+    if line == "SAY_TIME" then line = "SAY It is " .. os.date("%I:%M %p"):gsub("^0", "") end
+    if line == "SAY_DATE" then line = "SAY Today is " .. os.date("%A, %d %B %Y") end
     local kind, arg = line:match("^(%u+)%s+(.+)$")
     if kind == "KEYS" and M.actions[trim(arg)] then
       table.insert(steps, { kind = "KEYS", arg = trim(arg) })
-    elseif kind == "RUN" or kind == "TYPE" or kind == "OPEN" then
+    elseif kind == "RUN" or kind == "TYPE" or kind == "OPEN" or kind == "SAY" then
       table.insert(steps, { kind = kind, arg = trim(arg) })
     end
   end
@@ -442,6 +555,7 @@ local function describe(steps)
     elseif s.kind == "RUN" then table.insert(parts, s.arg .. " ↵")
     elseif s.kind == "TYPE" then table.insert(parts, s.arg)
     elseif s.kind == "OPEN" then table.insert(parts, "open " .. s.arg)
+    elseif s.kind == "SAY" then table.insert(parts, "“" .. s.arg .. "”")
     end
   end
   return table.concat(parts, "  ·  ")
@@ -463,11 +577,13 @@ local function runStep(step)
     if step.kind == "RUN" then hs.eventtap.keyStroke({}, "return", 0) end
   elseif step.kind == "OPEN" then
     hs.application.launchOrFocus(step.arg)
+  elseif step.kind == "SAY" then
+    -- spoken by executePlan's summary; nothing to press
   end
 end
 
 local function needsTerminal(steps)
-  for _, s in ipairs(steps) do if s.kind ~= "OPEN" then return true end end
+  for _, s in ipairs(steps) do if s.kind ~= "OPEN" and s.kind ~= "SAY" then return true end end
   return false
 end
 
@@ -484,7 +600,7 @@ local function executePlan(steps, heard, mode)
     local step = steps[i]
     if not step then return end
     runStep(step)
-    hs.timer.doAfter(M.config.stepDelay, nextStep)
+    after(M.config.stepDelay, nextStep)
   end
   local function go()
     log(mode, heard, summary)
@@ -499,10 +615,11 @@ local function executePlan(steps, heard, mode)
   local waited = 0
   local poll
   poll = hs.timer.doEvery(0.1, function()
+    timers.focusPoll = poll
     waited = waited + 0.1
     if terminalInFront() then
       poll:stop()
-      hs.timer.doAfter(0.15, go)
+      after(0.15, go)
     elseif waited >= M.config.focusTimeout then
       poll:stop()
       log(mode, heard, "ABORTED: " .. M.config.terminalApp .. " did not come to the front")
@@ -579,7 +696,8 @@ KEYS <action>    press a terminal shortcut. Allowed actions: %s
 RUN <command>    type a zsh command and press Enter. Only for safe, read-only or navigation commands (cd, ls, pwd, cat, git status, git log, git diff, open, which, echo, mkdir).
 TYPE <command>   type a zsh command WITHOUT pressing Enter. Use for anything that deletes, moves, kills, installs, pushes, overwrites, or is ambiguous.
 OPEN <app name>  open a macOS application.
-Rules: reply with plan lines only, no explanation, no markdown, no numbering. If nothing applies, reply with exactly: NONE
+SAY <sentence>   speak a reply. Use it to answer general questions, greet, or explain briefly (one or two short sentences), and to confirm when something cannot be done.
+Rules: reply with plan lines only, no explanation, no markdown, no numbering. Every request gets at least one line; if it is a question or chat, answer it with SAY.
 Context: %s
 Spoken request: "%s"]]
 
@@ -819,6 +937,7 @@ end
 
 function M.start()
   hs.fs.mkdir(logDir)
+  M.warmVoice()
   if hs.accessibilityState(true) then startTaps(); return end
   -- Accessibility not granted yet: macOS has just shown its prompt. Poll until
   -- the user allows Hammerspoon, then start without needing a manual reload.
