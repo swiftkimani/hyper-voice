@@ -2,7 +2,7 @@
 
 Push-to-talk voice control for the [Hyper](https://hyper.is) terminal on macOS, plus dictation into any app.
 
-Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. What was heard and what was done appears in a small banner at the top of the Hyper window.
+Hold a key, say what you want, let go. "Open a new tab and go to desktop" opens a tab and runs `cd ~/Desktop`. "Show me the ten largest files in downloads" becomes a shell command and runs. What was heard and what was done appears in a small banner glued to the top of the Hyper window; it follows the window when you move or resize it and fades out after a few seconds.
 
 Everything runs locally and costs nothing: [Hammerspoon](https://www.hammerspoon.org) listens for the key, [sox](https://sox.sourceforge.net) records the mic, [whisper.cpp](https://github.com/ggerganov/whisper.cpp) turns speech into text offline, and the built-in macOS voice talks back. Phrases are matched locally first. Anything unmatched is turned into a short plan by an LLM: [Claude Code](https://claude.com/claude-code) (`claude -p`), [opencode](https://opencode.ai), or any OpenAI-compatible endpoint such as [Ollama](https://ollama.com) running a local model.
 
@@ -82,7 +82,7 @@ Edit `~/.hammerspoon/voice.lua`, then Reload Config from the Hammerspoon menu-ba
 | `M.places` | see file | Folder names for "go to …". |
 | `M.actions` | from `~/.hyper.js` | Shortcut names → key combos. Change these if you change your Hyper keymaps. |
 | `ai` | `"claude"` | `"claude"`, `"opencode"` or `"none"`. |
-| `claudeArgs` | `{ "--model", "haiku" }` | Use `{}` if haiku is not on your plan. |
+| `claudeArgs` | haiku + start-up-skipping flags | Drop `"--model", "haiku"` if haiku is not on your plan. The other flags stop Claude Code loading MCP connectors, sessions and skills for each voice command (12 s → ~5 s). |
 | `aiMayRun` | `true` | Let AI plans press Enter on commands marked safe. `false` types everything. |
 | `tapToTalk` | `true` | A quick tap starts hands-free listening. |
 | `pauseStop` / `pauseLevel` | 1.5 / `"2%"` | Hands-free: stop after this pause; raise the level in noisy rooms. |

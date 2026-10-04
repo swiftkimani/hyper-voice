@@ -14,7 +14,10 @@ local home = os.getenv("HOME")
 
 M.config = {
   ai = "claude",                       -- "claude" | "opencode" | "http" | "none"
-  claudeArgs = { "--model", "haiku" }, -- set to {} if haiku isn't on your plan
+  -- Flags that skip Claude Code's start-up work (MCP connectors, sessions, skills):
+  -- they cut a voice command from ~12 s to ~5 s. Remove "--model","haiku" if haiku isn't on your plan.
+  claudeArgs = { "--model", "haiku", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+    "--no-session-persistence", "--no-chrome", "--disable-slash-commands", "--setting-sources", "" },
   opencodeArgs = {},                   -- e.g. { "-m", "anthropic/claude-haiku-4-5" }
   -- ai = "http": any OpenAI-compatible chat endpoint. Works with Ollama (free, local),
   -- LM Studio, OpenAI, Groq, OpenRouter, Gemini's compatibility endpoint, etc.
@@ -29,7 +32,7 @@ M.config = {
   minSeconds = 0.4,                    -- shorter holds are ignored as accidental taps
   aiMayRun = true,                     -- let AI plans press Enter on commands it marks safe
   overlaySeconds = 4,                  -- how long the result stays on screen
-  stepDelay = 0.35,                    -- pause between steps of a plan (seconds)
+  stepDelay = 0.22,                    -- pause between steps of a plan (seconds)
   speak = true,                        -- say a short confirmation out loud (macOS voice, offline)
   speakVoice = nil,                    -- nil = system default; see `say -v ?` for names
   focusTimeout = 4,                    -- seconds to wait for Hyper to come to the front
@@ -191,16 +194,33 @@ end
 -- ---------------------------------------------------------------------------
 -- Overlay: a small banner at the top centre of the Hyper window (or the screen)
 
-local overlay = { canvas = nil, hideTimer = nil }
+local overlay = { canvas = nil, hideTimer = nil, followTimer = nil, lastKey = nil }
+
+local function terminalWindow()
+  local app = hs.application.find(M.config.terminalApp)
+  if not app then return nil end
+  local win = app:focusedWindow() or app:mainWindow() or app:allWindows()[1]
+  if win and win:isVisible() and not win:isMinimized() then return win end
+  return nil
+end
 
 local function overlayFrame()
-  local target
-  local app = hs.application.find(M.config.terminalApp)
-  if app then target = app:mainWindow() or app:allWindows()[1] end
-  if not target then target = hs.window.frontmostWindow() end
+  local target = terminalWindow() or hs.window.frontmostWindow()
   local f = target and target:frame() or hs.screen.mainScreen():frame()
   local w = math.min(640, math.max(320, f.w - 40))
   return { x = f.x + (f.w - w) / 2, y = f.y + 8, w = w }
+end
+
+-- Keep the banner glued to the terminal window: re-anchor whenever the window
+-- moves, resizes, or changes screen. Cheap enough to run 20× a second.
+local function overlayFollow()
+  if not overlay.canvas or not overlay.canvas:isShowing() then return end
+  local f = overlayFrame()
+  local key = string.format("%d,%d,%d", f.x, f.y, f.w)
+  if key == overlay.lastKey then return end
+  overlay.lastKey = key
+  local cur = overlay.canvas:frame()
+  overlay.canvas:frame({ x = f.x, y = f.y, w = f.w, h = cur.h })
 end
 
 local function overlayShow(lines, color, seconds)
@@ -210,9 +230,11 @@ local function overlayShow(lines, color, seconds)
   if not overlay.canvas then
     overlay.canvas = hs.canvas.new({ x = 0, y = 0, w = 10, h = 10 })
     overlay.canvas:level(hs.canvas.windowLevels.floating)
-    overlay.canvas:behavior({ "canJoinAllSpaces", "stationary" })
+    overlay.canvas:behavior({ "canJoinAllSpaces", "moveToActiveSpace" })
+    overlay.followTimer = hs.timer.doEvery(0.05, overlayFollow)
   end
   local c = overlay.canvas
+  overlay.lastKey = string.format("%d,%d,%d", f.x, f.y, f.w)
   c:frame({ x = f.x, y = f.y, w = f.w, h = h })
   c:replaceElements({
     { type = "rectangle", action = "fill", roundedRectRadii = { xRadius = 8, yRadius = 8 },
@@ -229,16 +251,16 @@ local function overlayShow(lines, color, seconds)
       textFont = "Menlo", textLineBreak = "truncateTail",
     })
   end
-  c:show()
+  if not c:isShowing() then c:show(0.12) end
   if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
   if seconds then
-    overlay.hideTimer = hs.timer.doAfter(seconds, function() c:hide() end)
+    overlay.hideTimer = hs.timer.doAfter(seconds, function() c:hide(0.25) end)
   end
 end
 
 local function overlayHide()
   if overlay.hideTimer then overlay.hideTimer:stop(); overlay.hideTimer = nil end
-  if overlay.canvas then overlay.canvas:hide() end
+  if overlay.canvas then overlay.canvas:hide(0.25) end
 end
 
 local colors = {
